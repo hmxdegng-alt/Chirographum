@@ -1,0 +1,64 @@
+{
+  "name": "chirographum",
+  "productName": "Chirographum",
+  "version": "0.0.1",
+  "description": "Editor de texto que escribe e imprime con tu propia letra.",
+  "author": "Chirographum contributors",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win nsis --publish never"
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "build": {
+    "appId": "io.github.hmxdegng-alt.chirographum",
+    "productName": "Chirographum",
+    "copyright": "Chirographum contributors · AGPL-3.0",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Chirographum",
+      "installerLanguages": [
+        "es_ES"
+      ],
+      "language": "3082",
+      "artifactName": "Chirographum-Setup-${version}.${ext}"
+    },
+    "publish": null
+  }
+}

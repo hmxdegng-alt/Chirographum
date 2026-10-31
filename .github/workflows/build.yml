@@ -1,0 +1,49 @@
+name: Instalador de Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Pruebas del motor
+        run: npm test
+
+      - name: Construir el instalador
+        run: npm run dist
+
+      - name: Guardar el instalador
+        uses: actions/upload-artifact@v6
+        with:
+          name: Chirographum-instalador-windows
+          path: release/*.exe
+          if-no-files-found: error
+
+      - name: Publicar la versión
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Chirographum ${{ github.ref_name }}
+          files: release/*.exe
+          body: |
+            Descarga `Chirographum-Setup-*.exe`, ábrelo y sigue el instalador.
+
+            Windows avisará de «aplicación no reconocida»: pulsa **Más información** y después **Ejecutar de todas formas**.
