@@ -6,6 +6,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # Publishing a release on GitHub (from the web or the API) builds the
+  # installer and attaches it to that release.
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -37,8 +41,8 @@ jobs:
           path: release/*.exe
           if-no-files-found: error
 
-      - name: Publicar la versión
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publicar la versión (etiqueta subida)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           name: Chirographum ${{ github.ref_name }}
@@ -47,3 +51,10 @@ jobs:
             Descarga `Chirographum-Setup-*.exe`, ábrelo y sigue el instalador.
 
             Windows avisará de «aplicación no reconocida»: pulsa **Más información** y después **Ejecutar de todas formas**.
+
+      - name: Adjuntar el instalador a la versión publicada
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: release/*.exe
