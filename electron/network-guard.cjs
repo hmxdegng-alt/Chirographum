@@ -29,6 +29,25 @@ function isAllowedUrl(rawUrl, devServerUrl) {
 }
 
 /**
+ * Chromium switches that cut networking for the whole process, including
+ * background services the page-level guard cannot see (spellcheck
+ * dictionary downloads, component updates, DNS prefetching).
+ * Must be applied before the app is ready.
+ * @param {import("electron").CommandLine} commandLine
+ */
+function applyOfflineSwitches(commandLine) {
+  // Every request goes to a dead proxy on this computer and fails locally.
+  // Loopback (the dev server) is never proxied.
+  commandLine.appendSwitch("proxy-server", "127.0.0.1:9");
+  // No DNS lookups leave the machine either.
+  commandLine.appendSwitch("host-resolver-rules", "MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1");
+  commandLine.appendSwitch("disable-background-networking");
+  commandLine.appendSwitch("disable-component-update");
+  commandLine.appendSwitch("disable-domain-reliability");
+  commandLine.appendSwitch("no-pings");
+}
+
+/**
  * Installs every guard on an Electron session and its windows.
  * @param {import("electron").Session} session
  * @param {string | undefined} devServerUrl
@@ -45,6 +64,8 @@ function installNetworkGuard(session, devServerUrl) {
   // Spellcheck dictionaries would be downloaded from the internet; they will
   // ship inside the app in a later phase.
   session.setSpellCheckerEnabled(false);
+  session.setSpellCheckerLanguages([]);
+  session.setSpellCheckerDictionaryDownloadURL("http://127.0.0.1:9/");
 }
 
 /**
@@ -59,4 +80,4 @@ function lockNavigation(contents, devServerUrl) {
   });
 }
 
-module.exports = { isAllowedUrl, installNetworkGuard, lockNavigation };
+module.exports = { isAllowedUrl, applyOfflineSwitches, installNetworkGuard, lockNavigation };

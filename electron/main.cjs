@@ -3,7 +3,9 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const { app, BrowserWindow, Menu, dialog, ipcMain, session } = require("electron");
-const { installNetworkGuard, lockNavigation } = require("./network-guard.cjs");
+const { applyOfflineSwitches, installNetworkGuard, lockNavigation } = require("./network-guard.cjs");
+
+applyOfflineSwitches(app.commandLine);
 
 const DEV_SERVER_URL = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
 const HAND_EXTENSION = "chmano";
