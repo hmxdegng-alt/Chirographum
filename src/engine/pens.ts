@@ -11,8 +11,13 @@ export interface PenModel {
   widthMm: number;
   /** How much pressure changes the width (0 = none, 1 = a lot). */
   pressureWidth: number;
-  /** Ink opacity of a single stroke. Overlapping strokes get darker. */
+  /**
+   * Opacity of the ink layer. Pens and pencils never get darker where
+   * strokes cross; markers and highlighters (later) will.
+   */
   opacity: number;
+  /** How much lighter the line gets at low pressure (0 = constant tone). */
+  pressureTone: number;
   /** Strength of the paper-grain texture inside the line (0–1). */
   grain: number;
   /** Fraction of the stroke length that tapers at the start and the end. */
@@ -31,6 +36,7 @@ export const PENS: PenModel[] = [
     widthMm: 0.4,
     pressureWidth: 0.3,
     opacity: 0.93,
+    pressureTone: 0.04,
     grain: 0.12,
     taper: 0.05,
     startBlob: 0.12,
@@ -43,6 +49,7 @@ export const PENS: PenModel[] = [
     widthMm: 0.3,
     pressureWidth: 0.3,
     opacity: 0.93,
+    pressureTone: 0.04,
     grain: 0.14,
     taper: 0.05,
     startBlob: 0.1,
@@ -55,6 +62,7 @@ export const PENS: PenModel[] = [
     widthMm: 0.36,
     pressureWidth: 0.25,
     opacity: 0.82,
+    pressureTone: 0.22,
     grain: 0.42,
     taper: 0.1,
     startBlob: 0.28,
@@ -67,6 +75,7 @@ export const PENS: PenModel[] = [
     widthMm: 0.45,
     pressureWidth: 0.4,
     opacity: 0.72,
+    pressureTone: 0.4,
     grain: 0.7,
     taper: 0.12,
     startBlob: 0,

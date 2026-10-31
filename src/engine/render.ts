@@ -1,6 +1,10 @@
 // Draws a laid-out page with a pen model: variable width from pressure,
-// tapered stroke ends, an ink blob where the pen lands, paper grain inside
-// the line, and darker ink where strokes cross.
+// tapered stroke ends, an ink blob where the pen lands and paper grain.
+//
+// Pens and pencils do not get darker where strokes cross, so all strokes
+// go into one tone mask first (brightness = how much ink), merged with
+// "lighten" (the darker of two inks wins, they never add up). The mask is
+// then turned into coloured ink with a single opacity.
 
 import { resample } from "./geometry";
 import type { Hand } from "./hand";
@@ -22,6 +26,10 @@ export interface RenderOptions {
 /** Size of one texel of the grain texture on paper, in millimetres. */
 const GRAIN_TEXEL_MM = 0.03;
 const GRAIN_SIZE = 256;
+/** Rows converted per pass from tone mask to ink, to keep memory low at 600 dpi. */
+const BAND_ROWS = 256;
+/** Tone levels used for stroke colours (avoids building thousands of colour strings). */
+const TONE_LEVELS = 64;
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
@@ -32,7 +40,10 @@ function createCanvas(width: number, height: number): HTMLCanvasElement {
 
 const grainCache = new Map<number, HTMLCanvasElement>();
 
-/** Tileable speckle texture: where it is dark, ink is missing (paper fibres). */
+/**
+ * Tileable paper texture, opaque grey: white where the paper takes ink,
+ * darker where fibres leave tiny gaps. Multiplied over the tone mask.
+ */
 function grainTexture(seed: number): HTMLCanvasElement {
   const cached = grainCache.get(seed);
   if (cached) return cached;
@@ -56,9 +67,13 @@ function grainTexture(seed: number): HTMLCanvasElement {
       const bottom = sample(x0, y0 + 1) * (1 - tx) + sample(x0 + 1, y0 + 1) * tx;
       const smooth = top * (1 - ty) + bottom * ty;
       const value = 0.55 * smooth + 0.45 * rng.next();
-      const alpha = Math.max(0, Math.min(1, (value - 0.5) * 2.4));
+      const gap = Math.max(0, Math.min(1, (value - 0.5) * 2.4));
+      const grey = Math.round((1 - gap) * 255);
       const offset = (y * GRAIN_SIZE + x) * 4;
-      image.data[offset + 3] = Math.round(alpha * 255);
+      image.data[offset] = grey;
+      image.data[offset + 1] = grey;
+      image.data[offset + 2] = grey;
+      image.data[offset + 3] = 255;
     }
   }
   ctx.putImageData(image, 0, 0);
@@ -66,13 +81,14 @@ function grainTexture(seed: number): HTMLCanvasElement {
   return canvas;
 }
 
-let scratch: HTMLCanvasElement | null = null;
+const toneStyles = Array.from({ length: TONE_LEVELS + 1 }, (_, i) => {
+  const v = Math.round((i / TONE_LEVELS) * 255);
+  return `rgb(${v},${v},${v})`;
+});
 
-function scratchCanvas(width: number, height: number): HTMLCanvasElement {
-  if (!scratch || scratch.width < width || scratch.height < height) {
-    scratch = createCanvas(Math.max(width, scratch?.width ?? 0), Math.max(height, scratch?.height ?? 0));
-  }
-  return scratch;
+/** Grey for a tone between 0 (no ink) and 1 (full ink). */
+function toneStyle(tone: number): string {
+  return toneStyles[Math.round(Math.max(0, Math.min(1, tone)) * TONE_LEVELS)];
 }
 
 /** Width multiplier from pressure (0.3–1). */
@@ -87,6 +103,12 @@ function taperFactor(distanceFromEnd: number, taperLength: number): number {
   return 0.45 + 0.55 * Math.pow(k, 0.6);
 }
 
+function parseHex(color: string): [number, number, number] {
+  const hex = color.replace("#", "");
+  const full = hex.length === 3 ? [...hex].map((c) => c + c).join("") : hex.padEnd(6, "0");
+  return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) || 0) as [number, number, number];
+}
+
 export function renderPage(
   canvas: HTMLCanvasElement,
   layout: LayoutResult,
@@ -94,25 +116,24 @@ export function renderPage(
   page: PageSettings,
   options: RenderOptions,
 ): void {
-  const { pxPerMm, pen, color, naturalness: nat } = options;
+  const { pxPerMm, pen, naturalness: nat } = options;
   canvas.width = Math.round(page.widthMm * pxPerMm);
   canvas.height = Math.round(page.heightMm * pxPerMm);
   const ctx = canvas.getContext("2d")!;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = "source-over";
+  ctx.filter = "none";
   ctx.globalAlpha = 1;
-  if (options.background === "white") {
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  } else {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }
 
-  const grain = grainTexture(options.seed);
-  const grainStrength = Math.min(1, pen.grain * (0.4 + 0.9 * nat.inkTexture));
+  // 1. Tone mask: black = no ink, white = full ink.
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = "lighten";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
   const baseWidthPx = pen.widthMm * pxPerMm;
   const stepPx = Math.max(0.5, pxPerMm * 0.04);
-  const softPx = pen.softnessMm * pxPerMm;
   const xh = page.xHeightMm;
 
   for (const glyph of layout.glyphs) {
@@ -129,74 +150,88 @@ export function renderPage(
       const length = samples[samples.length - 1].s;
       const taperLength = pen.taper * Math.max(length, xh * pxPerMm);
       const strokeWidth = baseWidthPx * (1 + rng.gauss() * 0.04 * nat.inkTexture);
+      // Each stroke carries slightly more or less ink; pressure lightens the tone.
+      const strokeTone = 1 - 0.07 * nat.inkTexture * rng.next();
+      const toneAt = (pressure: number) => strokeTone * (1 - pen.pressureTone * (1 - pressure) * (0.6 + 0.8 * nat.inkTexture));
       const widths = samples.map((sample) => {
         const fromEnd = Math.min(sample.s, length - sample.s);
         return Math.max(0.6, strokeWidth * pressureFactor(pen, sample.p) * taperFactor(fromEnd, taperLength));
       });
 
-      // Draw the stroke opaque on a small scratch canvas, then lay it on the
-      // page translucent, so only crossings between strokes get darker.
-      // Integer offsets: the scratch is copied pixel for pixel, never resampled,
-      // so nothing from outside the stroke's box can bleed onto the page.
-      const maxWidth = Math.max(...widths) * (1 + pen.startBlob);
-      const pad = Math.ceil(maxWidth + softPx * 3 + 2);
-      const minX = Math.floor(Math.min(...samples.map((s) => s.x)) - pad);
-      const minY = Math.floor(Math.min(...samples.map((s) => s.y)) - pad);
-      const maxX = Math.ceil(Math.max(...samples.map((s) => s.x)) + pad);
-      const maxY = Math.ceil(Math.max(...samples.map((s) => s.y)) + pad);
-      const width = maxX - minX;
-      const height = maxY - minY;
-      const work = scratchCanvas(width, height);
-      const wctx = work.getContext("2d")!;
-      wctx.setTransform(1, 0, 0, 1, 0, 0);
-      wctx.globalCompositeOperation = "source-over";
-      wctx.globalAlpha = 1;
-      wctx.clearRect(0, 0, work.width, work.height);
-      wctx.strokeStyle = color;
-      wctx.fillStyle = color;
-      wctx.lineCap = "round";
-      wctx.lineJoin = "round";
-
       if (samples.length === 1) {
-        wctx.beginPath();
-        wctx.arc(samples[0].x - minX, samples[0].y - minY, widths[0] / 2, 0, Math.PI * 2);
-        wctx.fill();
+        ctx.fillStyle = toneStyle(toneAt(samples[0].p));
+        ctx.beginPath();
+        ctx.arc(samples[0].x, samples[0].y, widths[0] / 2, 0, Math.PI * 2);
+        ctx.fill();
       }
       for (let i = 1; i < samples.length; i++) {
-        wctx.lineWidth = (widths[i - 1] + widths[i]) / 2;
-        wctx.beginPath();
-        wctx.moveTo(samples[i - 1].x - minX, samples[i - 1].y - minY);
-        wctx.lineTo(samples[i].x - minX, samples[i].y - minY);
-        wctx.stroke();
+        ctx.strokeStyle = toneStyle(toneAt((samples[i - 1].p + samples[i].p) / 2));
+        ctx.lineWidth = (widths[i - 1] + widths[i]) / 2;
+        ctx.beginPath();
+        ctx.moveTo(samples[i - 1].x, samples[i - 1].y);
+        ctx.lineTo(samples[i].x, samples[i].y);
+        ctx.stroke();
       }
       if (pen.startBlob > 0) {
+        // The pen rests a moment where it lands: a little wider and full tone.
         const blob = (widths[0] / 2) * (1 + pen.startBlob * (0.5 + rng.next()));
-        wctx.beginPath();
-        wctx.arc(samples[0].x - minX, samples[0].y - minY, blob, 0, Math.PI * 2);
-        wctx.fill();
+        ctx.fillStyle = toneStyle(1);
+        ctx.beginPath();
+        ctx.arc(samples[0].x, samples[0].y, blob, 0, Math.PI * 2);
+        ctx.fill();
       }
-
-      if (grainStrength > 0) {
-        const pattern = wctx.createPattern(grain, "repeat");
-        if (pattern) {
-          const texel = GRAIN_TEXEL_MM * pxPerMm;
-          pattern.setTransform(
-            new DOMMatrix().translate(-minX + rng.next() * GRAIN_SIZE * texel, -minY + rng.next() * GRAIN_SIZE * texel).scale(texel),
-          );
-          wctx.globalCompositeOperation = "destination-out";
-          wctx.globalAlpha = grainStrength;
-          wctx.fillStyle = pattern;
-          wctx.fillRect(0, 0, width, height);
-        }
-      }
-
-      ctx.save();
-      ctx.globalCompositeOperation = options.background === "white" ? "multiply" : "source-over";
-      ctx.globalAlpha = Math.max(0.3, Math.min(1, pen.opacity * (1 - 0.12 * nat.inkTexture * rng.next())));
-      ctx.imageSmoothingEnabled = false;
-      if (softPx > 0.35) ctx.filter = `blur(${softPx.toFixed(2)}px)`;
-      ctx.drawImage(work, 0, 0, width, height, minX, minY, width, height);
-      ctx.restore();
     });
+  }
+
+  // 2. Paper grain: the same paper under every stroke.
+  const grainStrength = Math.min(1, pen.grain * (0.4 + 0.9 * nat.inkTexture));
+  if (grainStrength > 0) {
+    const pattern = ctx.createPattern(grainTexture(options.seed), "repeat");
+    if (pattern) {
+      const texel = GRAIN_TEXEL_MM * pxPerMm;
+      const rng = createRng(deriveSeed(options.seed, "grain-offset"));
+      pattern.setTransform(new DOMMatrix().translate(rng.next() * GRAIN_SIZE * texel, rng.next() * GRAIN_SIZE * texel).scale(texel));
+      ctx.globalCompositeOperation = "multiply";
+      ctx.globalAlpha = grainStrength;
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // 3. Soft edges (pencil, ballpoint), still on the opaque mask.
+  const softPx = pen.softnessMm * pxPerMm;
+  if (softPx > 0.35) {
+    ctx.globalCompositeOperation = "copy";
+    ctx.filter = `blur(${softPx.toFixed(2)}px)`;
+    ctx.drawImage(canvas, 0, 0);
+    ctx.filter = "none";
+  }
+
+  // 4. Mask to coloured ink, in bands.
+  ctx.globalCompositeOperation = "source-over";
+  const [r, g, b] = parseHex(options.color);
+  const opacity = Math.max(0, Math.min(1, pen.opacity));
+  const white = options.background === "white";
+  for (let top = 0; top < canvas.height; top += BAND_ROWS) {
+    const rows = Math.min(BAND_ROWS, canvas.height - top);
+    const band = ctx.getImageData(0, top, canvas.width, rows);
+    const data = band.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const a = (data[i] / 255) * opacity;
+      if (white) {
+        // Ink over white paper.
+        data[i] = Math.round(255 + (r - 255) * a);
+        data[i + 1] = Math.round(255 + (g - 255) * a);
+        data[i + 2] = Math.round(255 + (b - 255) * a);
+        data[i + 3] = 255;
+      } else {
+        data[i] = r;
+        data[i + 1] = g;
+        data[i + 2] = b;
+        data[i + 3] = Math.round(a * 255);
+      }
+    }
+    ctx.putImageData(band, 0, top);
   }
 }

@@ -1,5 +1,7 @@
 // Page geometry, naturalness (imperfections) and the factory presets.
 
+import { createRng, deriveSeed } from "./random";
+
 export interface PageSettings {
   widthMm: number;
   heightMm: number;
@@ -105,4 +107,26 @@ export const DEFAULT_PRESET_ID = "normal";
 
 export function presetById(id: string): Preset {
   return PRESETS.find((preset) => preset.id === id) ?? PRESETS[1];
+}
+
+/** The "Aleatorio" mode: values come from the version seed. */
+export const RANDOM_PRESET_ID = "random";
+
+/**
+ * Believable imperfections for one page. A single "hurry" level for the
+ * whole page keeps the values coherent (a careful page is careful in
+ * everything), with a little independent variation per value.
+ */
+export function randomNaturalness(seed: number): Naturalness {
+  const rng = createRng(deriveSeed(seed, "random-preset"));
+  const careful = presetById("careful").values;
+  const hurried = presetById("hurried").values;
+  const hurry = rng.next();
+  const result = { ...careful };
+  for (const key of Object.keys(careful) as (keyof Naturalness)[]) {
+    const t = Math.max(0, Math.min(1, hurry + (rng.next() - 0.5) * 0.3));
+    const value = careful[key] + (hurried[key] - careful[key]) * t;
+    result[key] = key === "slantDegrees" ? Math.round(value + (rng.next() - 0.5) * 3) : Math.round(value * 100) / 100;
+  }
+  return result;
 }

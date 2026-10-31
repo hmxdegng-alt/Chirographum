@@ -11,7 +11,7 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 Esta versión sirve para comprobar si el resultado engaña antes de construir el editor completo. Permite:
 
 - **Tu letra:** dibujar con el ratón, el trackpad o un lápiz digital cada letra de una frase de prueba, varias veces. Incluye guías, letra de referencia, suavizado contra el temblor y presión simulada por la velocidad.
-- **Hoja:** escribir un texto en A4 con tu letra, con boli de gel, bola o lápiz HB, y con imperfecciones ajustables: tamaño, rotación, inclinación, líneas que se tuercen, margen que se desplaza, letra que encoge al llegar al borde y textura de la tinta.
+- **Hoja:** escribir un texto en A4 con tu letra, con boli de gel, bola o lápiz HB, y con imperfecciones ajustables: tamaño, rotación, inclinación, líneas que se tuercen, margen que se desplaza, letra que encoge al llegar al borde y textura de la tinta. El preset **Aleatorio** elige valores creíbles distintos en cada versión.
 - **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp).
 - **Guardar y abrir tu mano** como archivo `.chmano`.
 
@@ -25,7 +25,7 @@ Las actualizaciones se instalan igual: descargando el instalador nuevo.
 
 ## Cómo hacer la prueba de realismo
 
-1. En **Tu letra**, deja la frase de prueba o escribe otra, y dibuja cada letra 3 veces. Pulsa **Intro** para guardar cada dibujo.
+1. En **Tu letra**, deja la frase de prueba o escribe otra. Cada letra aparece en varios huecos con una letra fantasma de guía: dibújala en todos y pulsa **Intro** para guardarlos de una vez. Con **Ctrl + rueda** haces zoom.
 2. Pasa a **Hoja**, escribe un texto con esas letras y elige el boli que usas normalmente.
 3. Pulsa **Imprimir…**, elige A4 y escala 100 % (sin «ajustar a página»). Mejor con impresora de tinta: el tóner láser brilla.
 4. Escribe la misma frase a mano con tu boli y compara las dos hojas.

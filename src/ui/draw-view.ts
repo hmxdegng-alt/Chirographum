@@ -17,26 +17,34 @@ import {
 import { es } from "../i18n/es";
 import type { Store } from "../store";
 import { button, h, slider, toast } from "./dom";
+import { createZoomControl } from "./zoom";
 
-// Drawing cell geometry, in CSS pixels.
-const CELL_WIDTH = 640;
+// Drawing area geometry, in logical pixels (the zoom scales all of it).
 const CELL_HEIGHT = 420;
-const ORIGIN_X = 150;
 const BASELINE_Y = 268;
 const X_HEIGHT_PX = 96;
 const ASCENDER_Y = BASELINE_Y - 1.9 * X_HEIGHT_PX;
 const DESCENDER_Y = BASELINE_Y + 0.9 * X_HEIGHT_PX;
 const X_LINE_Y = BASELINE_Y - X_HEIGHT_PX;
+const SIDE_PAD = 20;
+const MIN_WIDTH = 640;
+/** At most this many ghost slots on screen; more variants take several saves. */
+const MAX_SLOTS = 5;
+/** Slot width: the reference letter plus room around it, in x-heights. */
+const SLOT_MIN_XH = 2.3;
+const SLOT_ROOM_XH = 1.2;
+const ZOOM_MIN = 0.3;
+const ZOOM_MAX = 4;
+/** Canvas backing store limit, in pixels, so very high zoom stays fast. */
+const MAX_CANVAS_PIXELS = 24_000_000;
 
 /** Speed (x-heights per millisecond) that counts as a fast stroke. */
 const FAST_SPEED = 0.02;
 const SIMPLIFY_EPSILON = 0.004;
-const SECONDS_PER_DRAWING = 8;
-const MAX_VARIANTS = 10;
+const SECONDS_PER_DRAWING = 6;
+const MAX_VARIANTS = 20;
 const INK = "#1d2b5c";
-
-const toCellX = (x: number) => ORIGIN_X + x * X_HEIGHT_PX;
-const toCellY = (y: number) => BASELINE_Y - y * X_HEIGHT_PX;
+const REFERENCE_FONT = "Georgia, 'Times New Roman', serif";
 
 function slugify(name: string): string {
   return (
@@ -51,8 +59,14 @@ function slugify(name: string): string {
 
 export function createDrawView(store: Store): { root: HTMLElement; onShow: () => void } {
   let selectedChar: string | null = null;
-  let strokes: Stroke[] = [];
-  let active: { points: StrokePoint[]; start: number; pointerType: string; pointerId: number } | null = null;
+  /** Strokes of every ghost slot, in x-height units from that slot's origin. */
+  let slotStrokes: Stroke[][] = [[]];
+  /** Slot of every stroke, in drawing order (for undo). */
+  let history: number[] = [];
+  let active: { slot: number; points: StrokePoint[]; start: number; pointerType: string; pointerId: number } | null = null;
+  let slotWidth = MIN_WIDTH - 2 * SIDE_PAD;
+  let canvasWidth = MIN_WIDTH;
+  let referenceWidth = X_HEIGHT_PX;
   let smoothing = loadPreference("draw.smoothing", 0.5);
   let thickness = loadPreference("draw.thickness", 5);
   let simulatePressure = loadPreference("draw.simulatePressure", true);
@@ -71,7 +85,8 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     { class: "button-row" },
     button(es.hand.newHand, () => {
       if (!window.confirm(es.hand.confirmNew)) return;
-      strokes = [];
+      slotStrokes = [];
+      history = [];
       store.update({ hand: createHand(es.hand.defaultName) });
     }),
     button(es.hand.open, async () => {
@@ -133,10 +148,25 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     estimateText,
   );
 
-  // ----- Centre: drawing cell -----
-  const canvas = h("canvas", { class: "draw-canvas", width: CELL_WIDTH, height: CELL_HEIGHT });
+  // ----- Centre: drawing area with ghost slots -----
+  const canvas = h("canvas", { class: "draw-canvas" });
   const ctx = canvas.getContext("2d")!;
   const currentLabel = h("p", { class: "current-label" });
+  const canvasFrame = h("div", { class: "canvas-frame" }, canvas);
+  const saveButton = button(es.draw.save, saveAll, "primary");
+  const slotsHelp = h("p", { class: "muted centred-text" }, es.draw.slotsHelp);
+
+  const zoom = createZoomControl({
+    scroller: canvasFrame,
+    content: () => canvas,
+    min: ZOOM_MIN,
+    max: ZOOM_MAX,
+    fit: () => Math.min(1.5, Math.max(ZOOM_MIN, (canvasFrame.clientWidth - 2) / canvasWidth)),
+    apply: (scale) => {
+      sizeCanvas(scale);
+      redraw();
+    },
+  });
 
   const smoothingSlider = slider({
     label: es.draw.smoothing,
@@ -178,15 +208,10 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
   const centre = h(
     "section",
     { class: "draw-centre" },
-    currentLabel,
-    h("div", { class: "canvas-frame" }, canvas),
-    h(
-      "div",
-      { class: "button-row centred" },
-      button(es.draw.undo, undoStroke),
-      button(es.draw.clear, clearDrawing),
-      button(es.draw.save, saveVariant, "primary"),
-    ),
+    h("div", { class: "draw-head" }, currentLabel, zoom.bar),
+    canvasFrame,
+    h("div", { class: "button-row centred" }, button(es.draw.undo, undoStroke), button(es.draw.clear, clearDrawing), saveButton),
+    slotsHelp,
     h("p", { class: "muted centred-text" }, es.draw.shortcuts),
     h(
       "div",
@@ -239,20 +264,53 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     const chars = allCharacters();
     if (selectedChar && chars.includes(selectedChar)) return;
     selectedChar = firstIncomplete(null) ?? chars[0] ?? null;
+    slotStrokes = [];
+    history = [];
   }
 
-  function setupCanvas(): void {
-    const ratio = window.devicePixelRatio || 1;
-    // CSS scales the cell to the available width; pointer positions are mapped back.
-    canvas.width = Math.round(CELL_WIDTH * ratio);
-    canvas.height = Math.round(CELL_HEIGHT * ratio);
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  /** How many ghost slots to show for the selected character. */
+  function slotCount(): number {
+    if (!selectedChar) return 1;
+    const missing = store.get().variantsTarget - countOf(selectedChar);
+    return Math.max(1, Math.min(MAX_SLOTS, missing));
   }
 
   function referenceFontSize(): number {
-    ctx.font = "100px Georgia, 'Times New Roman', serif";
+    ctx.font = `100px ${REFERENCE_FONT}`;
     const ascent = ctx.measureText("x").actualBoundingBoxAscent || 46;
     return (X_HEIGHT_PX / ascent) * 100;
+  }
+
+  /** Recomputes slots and canvas width; keeps what is already drawn in the slots that remain. */
+  function layoutSlots(): void {
+    const count = slotCount();
+    slotStrokes = Array.from({ length: count }, (_, i) => slotStrokes[i] ?? []);
+    history = history.filter((slot) => slot < count);
+    ctx.font = `${referenceFontSize()}px ${REFERENCE_FONT}`;
+    referenceWidth = selectedChar ? ctx.measureText(selectedChar).width : X_HEIGHT_PX;
+    const natural = Math.max(SLOT_MIN_XH * X_HEIGHT_PX, referenceWidth + SLOT_ROOM_XH * X_HEIGHT_PX);
+    canvasWidth = Math.max(MIN_WIDTH, 2 * SIDE_PAD + count * natural);
+    slotWidth = (canvasWidth - 2 * SIDE_PAD) / count;
+    saveButton.textContent = count > 1 ? es.draw.saveMany : es.draw.save;
+    slotsHelp.hidden = count < 2;
+  }
+
+  const slotLeft = (slot: number) => SIDE_PAD + slot * slotWidth;
+  /** Where the reference letter starts in a slot; strokes are stored relative to it. */
+  const slotOrigin = (slot: number) => slotLeft(slot) + Math.max(0, (slotWidth - referenceWidth) / 2);
+  const toCellX = (slot: number, x: number) => slotOrigin(slot) + x * X_HEIGHT_PX;
+  const toCellY = (y: number) => BASELINE_Y - y * X_HEIGHT_PX;
+
+  function sizeCanvas(scale: number): void {
+    const ratio = window.devicePixelRatio || 1;
+    let backing = scale * ratio;
+    const pixels = canvasWidth * CELL_HEIGHT * backing * backing;
+    if (pixels > MAX_CANVAS_PIXELS) backing *= Math.sqrt(MAX_CANVAS_PIXELS / pixels);
+    canvas.width = Math.round(canvasWidth * backing);
+    canvas.height = Math.round(CELL_HEIGHT * backing);
+    canvas.style.width = `${canvasWidth * scale}px`;
+    canvas.style.height = `${CELL_HEIGHT * scale}px`;
+    ctx.setTransform(backing, 0, 0, backing, 0, 0);
   }
 
   function drawGuide(y: number, color: string, dash: number[], width = 1): void {
@@ -261,13 +319,13 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     ctx.lineWidth = width;
     ctx.setLineDash(dash);
     ctx.beginPath();
-    ctx.moveTo(24, y);
-    ctx.lineTo(CELL_WIDTH - 24, y);
+    ctx.moveTo(SIDE_PAD, y);
+    ctx.lineTo(canvasWidth - SIDE_PAD, y);
     ctx.stroke();
     ctx.restore();
   }
 
-  function drawStroke(points: StrokePoint[]): void {
+  function drawStroke(slot: number, points: StrokePoint[]): void {
     if (points.length === 0) return;
     ctx.save();
     ctx.strokeStyle = INK;
@@ -276,15 +334,15 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     ctx.lineJoin = "round";
     if (points.length === 1) {
       ctx.beginPath();
-      ctx.arc(toCellX(points[0].x), toCellY(points[0].y), thickness / 2, 0, Math.PI * 2);
+      ctx.arc(toCellX(slot, points[0].x), toCellY(points[0].y), thickness / 2, 0, Math.PI * 2);
       ctx.fill();
     }
     for (let i = 1; i < points.length; i++) {
       const pressure = (points[i - 1].p + points[i].p) / 2;
       ctx.lineWidth = Math.max(1, thickness * (0.55 + 0.6 * pressure));
       ctx.beginPath();
-      ctx.moveTo(toCellX(points[i - 1].x), toCellY(points[i - 1].y));
-      ctx.lineTo(toCellX(points[i].x), toCellY(points[i].y));
+      ctx.moveTo(toCellX(slot, points[i - 1].x), toCellY(points[i - 1].y));
+      ctx.lineTo(toCellX(slot, points[i].x), toCellY(points[i].y));
       ctx.stroke();
     }
     ctx.restore();
@@ -294,31 +352,51 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     redrawQueued = false;
     ctx.save();
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, CELL_WIDTH, CELL_HEIGHT);
+    ctx.fillRect(0, 0, canvasWidth, CELL_HEIGHT);
     ctx.restore();
+
+    const count = slotStrokes.length;
+    const nextEmpty = slotStrokes.findIndex((strokes) => strokes.length === 0);
+    if (count > 1 && nextEmpty >= 0 && !active) {
+      ctx.fillStyle = "#f4f6fc";
+      ctx.fillRect(slotLeft(nextEmpty), 14, slotWidth, CELL_HEIGHT - 28);
+    }
     drawGuide(ASCENDER_Y, "#d5dbe8", [2, 4]);
     drawGuide(X_LINE_Y, "#aab6d3", [6, 5]);
     drawGuide(BASELINE_Y, "#6f86c2", [], 1.5);
     drawGuide(DESCENDER_Y, "#d5dbe8", [2, 4]);
+
     ctx.save();
-    ctx.strokeStyle = "#e3e7f0";
+    ctx.strokeStyle = "#dde2ec";
     ctx.setLineDash([3, 5]);
-    ctx.beginPath();
-    ctx.moveTo(ORIGIN_X, 20);
-    ctx.lineTo(ORIGIN_X, CELL_HEIGHT - 20);
-    ctx.stroke();
+    for (let slot = 1; slot < count; slot++) {
+      ctx.beginPath();
+      ctx.moveTo(slotLeft(slot), 20);
+      ctx.lineTo(slotLeft(slot), CELL_HEIGHT - 20);
+      ctx.stroke();
+    }
     ctx.restore();
 
-    if (showReference && selectedChar) {
+    if (selectedChar) {
       ctx.save();
-      ctx.font = `${referenceFontSize()}px Georgia, 'Times New Roman', serif`;
-      ctx.fillStyle = "rgba(41, 72, 168, 0.11)";
       ctx.textBaseline = "alphabetic";
-      ctx.fillText(selectedChar, ORIGIN_X + 6, BASELINE_Y);
+      if (count > 1) {
+        ctx.font = `13px "Segoe UI", system-ui, sans-serif`;
+        ctx.fillStyle = "#9aa3b5";
+        for (let slot = 0; slot < count; slot++) ctx.fillText(String(slot + 1), slotLeft(slot) + 8, 32);
+      }
+      if (showReference) {
+        ctx.font = `${referenceFontSize()}px ${REFERENCE_FONT}`;
+        for (let slot = 0; slot < count; slot++) {
+          // Ghost letter: fainter once the slot has been drawn in.
+          ctx.fillStyle = slotStrokes[slot].length > 0 ? "rgba(41, 72, 168, 0.05)" : "rgba(41, 72, 168, 0.11)";
+          ctx.fillText(selectedChar, slotOrigin(slot), BASELINE_Y);
+        }
+      }
       ctx.restore();
     }
-    for (const stroke of strokes) drawStroke(stroke);
-    if (active) drawStroke(active.points);
+    slotStrokes.forEach((strokes, slot) => strokes.forEach((stroke) => drawStroke(slot, stroke)));
+    if (active) drawStroke(active.slot, active.points);
   }
 
   function queueRedraw(): void {
@@ -327,14 +405,21 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     requestAnimationFrame(redraw);
   }
 
-  function eventToPoint(event: PointerEvent, start: number): StrokePoint {
+  /** Pointer position in logical canvas pixels. */
+  function eventToCell(event: PointerEvent): { x: number; y: number } {
     const rect = canvas.getBoundingClientRect();
-    const cssX = ((event.clientX - rect.left) * CELL_WIDTH) / rect.width;
-    const cssY = ((event.clientY - rect.top) * CELL_HEIGHT) / rect.height;
+    return {
+      x: ((event.clientX - rect.left) * canvasWidth) / rect.width,
+      y: ((event.clientY - rect.top) * CELL_HEIGHT) / rect.height,
+    };
+  }
+
+  function eventToPoint(event: PointerEvent, slot: number, start: number): StrokePoint {
+    const cell = eventToCell(event);
     const realPressure = event.pointerType === "pen" && event.pressure > 0;
     return {
-      x: (cssX - ORIGIN_X) / X_HEIGHT_PX,
-      y: (BASELINE_Y - cssY) / X_HEIGHT_PX,
+      x: (cell.x - slotOrigin(slot)) / X_HEIGHT_PX,
+      y: (BASELINE_Y - cell.y) / X_HEIGHT_PX,
       p: realPressure ? event.pressure : 0.6,
       t: event.timeStamp - start,
     };
@@ -345,8 +430,11 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     if (!selectedChar) return;
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
+    // A stroke belongs to the slot where it starts, even if it runs over the edge.
+    const cellX = eventToCell(event).x;
+    const slot = Math.max(0, Math.min(slotStrokes.length - 1, Math.floor((cellX - SIDE_PAD) / slotWidth)));
     const start = event.timeStamp;
-    active = { points: [eventToPoint(event, start)], start, pointerType: event.pointerType, pointerId: event.pointerId };
+    active = { slot, points: [eventToPoint(event, slot, start)], start, pointerType: event.pointerType, pointerId: event.pointerId };
     queueRedraw();
   });
 
@@ -354,7 +442,7 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     if (!active || event.pointerId !== active.pointerId) return;
     const events = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [event];
     for (const item of events.length > 0 ? events : [event]) {
-      const raw = eventToPoint(item, active.start);
+      const raw = eventToPoint(item, active.slot, active.start);
       const last = active.points[active.points.length - 1];
       active.points.push(stabilise(last, raw, smoothing));
     }
@@ -368,7 +456,8 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
       points = simulatePressure ? pressureFromVelocity(points, FAST_SPEED) : points.map((p) => ({ ...p, p: 0.6 }));
     }
     points = simplify(points, SIMPLIFY_EPSILON);
-    strokes.push(points);
+    slotStrokes[active.slot].push(points);
+    history.push(active.slot);
     active = null;
     queueRedraw();
   };
@@ -376,34 +465,52 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
   canvas.addEventListener("pointercancel", finishStroke);
 
   function undoStroke(): void {
-    strokes.pop();
+    const slot = history.pop();
+    if (slot === undefined) return;
+    slotStrokes[slot].pop();
     queueRedraw();
   }
 
   function clearDrawing(): void {
-    strokes = [];
+    slotStrokes = slotStrokes.map(() => []);
+    history = [];
     queueRedraw();
   }
 
-  function saveVariant(): void {
-    if (!selectedChar || strokes.length === 0) return;
-    const variant: GlyphVariant = { strokes };
+  /** Relayout after the slot count may have changed; keeps the zoom. */
+  function relayout(): void {
+    const before = canvasWidth;
+    layoutSlots();
+    if (canvasWidth !== before) zoom.refit();
+    sizeCanvas(zoom.scale());
+    queueRedraw();
+  }
+
+  /** Saves every slot that has a drawing, each as one variant. */
+  function saveAll(): void {
+    if (!selectedChar) return;
+    const drawn = slotStrokes.filter((strokes) => strokes.length > 0);
+    if (drawn.length === 0) return;
     const char = selectedChar;
-    store.update({ hand: withVariantAdded(store.get().hand, char, variant) });
-    strokes = [];
+    let hand = store.get().hand;
+    for (const strokes of drawn) hand = withVariantAdded(hand, char, { strokes } satisfies GlyphVariant);
+    slotStrokes = [];
+    history = [];
+    store.update({ hand });
     if (countOf(char) >= store.get().variantsTarget) {
       selectedChar = firstIncomplete(char) ?? char;
     }
     refresh();
-    queueRedraw();
+    relayout();
   }
 
   function selectChar(char: string): void {
     if (char === selectedChar) return;
     selectedChar = char;
-    strokes = [];
+    slotStrokes = [];
+    history = [];
     refresh();
-    queueRedraw();
+    relayout();
   }
 
   function thumbnail(variant: GlyphVariant): HTMLCanvasElement {
@@ -492,7 +599,9 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     if (selectedChar) {
       const count = countOf(selectedChar);
       currentLabel.textContent =
-        count < target ? es.draw.current(selectedChar, count + 1, target) : es.draw.currentExtra(selectedChar, count + 1 - target);
+        count < target
+          ? es.draw.current(selectedChar, count + 1, Math.min(target, count + slotCount()), target)
+          : es.draw.currentExtra(selectedChar, count + 1 - target);
       variantsTitle.textContent = es.draw.variantsOf(selectedChar);
       const variants = state.hand.glyphs[selectedChar] ?? [];
       const char = selectedChar;
@@ -517,9 +626,12 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
 
   store.subscribe((state, previous) => {
     if (state.hand !== previous.hand || state.phrase !== previous.phrase || state.extraChars !== previous.extraChars || state.variantsTarget !== previous.variantsTarget) {
-      if (state.hand !== previous.hand && state.hand.createdAt !== previous.hand.createdAt) strokes = [];
+      if (state.hand !== previous.hand && state.hand.createdAt !== previous.hand.createdAt) {
+        slotStrokes = [];
+        history = [];
+      }
       refresh();
-      queueRedraw();
+      relayout();
     }
   });
 
@@ -529,7 +641,7 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
     if (event.key === "Enter") {
       event.preventDefault();
-      saveVariant();
+      saveAll();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
       undoStroke();
@@ -539,16 +651,24 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     }
   });
 
-  setupCanvas();
+  window.addEventListener("resize", () => {
+    if (store.get().tab === "draw") zoom.refit();
+  });
+
   refresh();
-  redraw();
+  layoutSlots();
+  sizeCanvas(1);
 
   return {
     root,
     onShow() {
-      setupCanvas();
       refresh();
-      redraw();
+      layoutSlots();
+      // The frame only has a size once the view is visible.
+      requestAnimationFrame(() => {
+        zoom.refit();
+        redraw();
+      });
     },
   };
 }

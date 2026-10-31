@@ -14,7 +14,7 @@ import {
 } from "../src/engine/hand";
 import { glyphPointToPage, layoutText } from "../src/engine/layout";
 import { createRng, deriveSeed } from "../src/engine/random";
-import { A4, presetById } from "../src/engine/settings";
+import { A4, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
 const { isAllowedUrl } = require("../electron/network-guard.cjs") as {
@@ -178,5 +178,26 @@ describe("network guard", () => {
     expect(isAllowedUrl("ws://localhost:5173/", dev)).toBe(true);
     expect(isAllowedUrl("http://localhost:8080/", dev)).toBe(false);
     expect(isAllowedUrl("https://example.com/", dev)).toBe(false);
+  });
+});
+
+describe("random preset", () => {
+  it("stays between careful and hurried and depends only on the seed", () => {
+    const careful = presetById("careful").values;
+    const hurried = presetById("hurried").values;
+    for (let seed = 1; seed < 200; seed++) {
+      const values = randomNaturalness(seed);
+      expect(randomNaturalness(seed)).toEqual(values);
+      for (const key of Object.keys(careful) as (keyof typeof careful)[]) {
+        if (key === "slantDegrees") {
+          expect(values[key]).toBeGreaterThanOrEqual(-2);
+          expect(values[key]).toBeLessThanOrEqual(6);
+        } else {
+          expect(values[key]).toBeGreaterThanOrEqual(careful[key] - 1e-9);
+          expect(values[key]).toBeLessThanOrEqual(hurried[key] + 1e-9);
+        }
+      }
+    }
+    expect(randomNaturalness(1)).not.toEqual(randomNaturalness(2));
   });
 });
