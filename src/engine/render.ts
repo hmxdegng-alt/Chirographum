@@ -1,16 +1,18 @@
-// Draws a laid-out page with a pen model: variable width from pressure,
-// tapered stroke ends, an ink blob where the pen lands and paper grain.
+// Draws one page of a layout with a pen model: variable width from
+// pressure, bumpy edges, round ink-pooled ends, paper grain and, for old
+// pens, skips.
 //
 // Pens and pencils do not get darker where strokes cross, so all strokes
 // go into one tone mask first (brightness = how much ink), merged with
 // "lighten" (the darker of two inks wins, they never add up). The mask is
-// then turned into coloured ink with a single opacity.
+// then turned into coloured ink with a single opacity. Markers do build up:
+// each stroke becomes its own translucent layer.
 
-import { resample } from "./geometry";
+import { resample, type Sample } from "./geometry";
 import type { Hand } from "./hand";
 import { glyphPointToPage, type LayoutResult } from "./layout";
 import type { PenModel } from "./pens";
-import { createRng, deriveSeed } from "./random";
+import { createRng, deriveSeed, type Rng } from "./random";
 import type { Naturalness, PageSettings } from "./settings";
 
 export interface RenderOptions {
@@ -19,8 +21,18 @@ export interface RenderOptions {
   color: string;
   naturalness: Naturalness;
   seed: number;
+  /** Page of the layout to draw (0-based). */
+  pageIndex: number;
   /** "white" for the on-screen preview, "transparent" for printing (the paper is the background). */
   background: "white" | "transparent";
+}
+
+/** Pixel box around all the ink of the page, or null for an empty page. */
+export interface InkBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /** Size of one texel of the grain texture on paper, in millimetres. */
@@ -30,6 +42,9 @@ const GRAIN_SIZE = 256;
 const BAND_ROWS = 256;
 /** Tone levels used for stroke colours (avoids building thousands of colour strings). */
 const TONE_LEVELS = 64;
+/** Wavelength of the edge bumps and of pen skips, in millimetres. */
+const EDGE_NOISE_MM = 0.09;
+const SKIP_NOISE_MM = 0.45;
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
@@ -91,6 +106,19 @@ function toneStyle(tone: number): string {
   return toneStyles[Math.round(Math.max(0, Math.min(1, tone)) * TONE_LEVELS)];
 }
 
+/** Smooth 1D noise in [-1, 1] along a distance, with the given wavelength. */
+function noise1D(rng: Rng, wavelength: number): (s: number) => number {
+  const values: number[] = [];
+  return (s: number) => {
+    const t = s / wavelength;
+    const i = Math.floor(t);
+    while (values.length <= i + 1) values.push(rng.next() * 2 - 1);
+    const k = t - i;
+    const smooth = k * k * (3 - 2 * k);
+    return values[i] * (1 - smooth) + values[i + 1] * smooth;
+  };
+}
+
 /** Width multiplier from pressure (0.3–1). */
 function pressureFactor(pen: PenModel, pressure: number): number {
   return 1 - pen.pressureWidth + pen.pressureWidth * (0.35 + 0.9 * pressure);
@@ -109,118 +137,127 @@ function parseHex(color: string): [number, number, number] {
   return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) || 0) as [number, number, number];
 }
 
-export function renderPage(
-  canvas: HTMLCanvasElement,
-  layout: LayoutResult,
-  hand: Hand,
-  page: PageSettings,
-  options: RenderOptions,
-): void {
-  const { pxPerMm, pen, naturalness: nat } = options;
-  canvas.width = Math.round(page.widthMm * pxPerMm);
-  canvas.height = Math.round(page.heightMm * pxPerMm);
-  const ctx = canvas.getContext("2d")!;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.filter = "none";
-  ctx.globalAlpha = 1;
+interface StrokeGeometry {
+  samples: Sample[];
+  widths: number[];
+  tones: number[];
+  startBlob: number;
+  endBlob: number;
+}
 
-  // 1. Tone mask: black = no ink, white = full ink.
-  ctx.globalCompositeOperation = "source-over";
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.globalCompositeOperation = "lighten";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+/** Turns one drawn stroke into page samples with width and tone at each one. */
+function strokeGeometry(
+  stroke: { x: number; y: number; p: number }[],
+  rng: Rng,
+  pen: PenModel,
+  nat: Naturalness,
+  pxPerMm: number,
+  xhMm: number,
+): StrokeGeometry {
+  const samples = resample(stroke, Math.max(0.5, pxPerMm * 0.04));
+  const length = samples[samples.length - 1].s;
+  const taperLength = pen.taper * Math.max(length, xhMm * pxPerMm);
+  const strokeWidth = pen.widthMm * pxPerMm * (1 + rng.gauss() * 0.04 * nat.inkTexture);
+  const edge = noise1D(rng, EDGE_NOISE_MM * pxPerMm);
+  const edgeAmount = pen.edgeRoughness * (0.5 + 0.8 * nat.inkTexture);
+  const skips = noise1D(rng, SKIP_NOISE_MM * pxPerMm * (0.6 + rng.next()));
+  const skipLevel = nat.inkSkips * pen.skipProne;
+  // Each stroke carries slightly more or less ink; pressure lightens the tone.
+  const strokeTone = 1 - 0.07 * nat.inkTexture * rng.next();
 
-  const baseWidthPx = pen.widthMm * pxPerMm;
-  const stepPx = Math.max(0.5, pxPerMm * 0.04);
-  const xh = page.xHeightMm;
-
-  for (const glyph of layout.glyphs) {
-    const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
-    if (!variant) continue;
-    variant.strokes.forEach((stroke, strokeIndex) => {
-      if (stroke.length === 0) return;
-      const rng = createRng(deriveSeed(glyph.seed, "stroke", strokeIndex));
-      const pagePoints = stroke.map((point) => {
-        const mapped = glyphPointToPage(glyph, xh, point.x, point.y);
-        return { x: mapped.x * pxPerMm, y: mapped.y * pxPerMm, p: point.p };
-      });
-      const samples = resample(pagePoints, stepPx);
-      const length = samples[samples.length - 1].s;
-      const taperLength = pen.taper * Math.max(length, xh * pxPerMm);
-      const strokeWidth = baseWidthPx * (1 + rng.gauss() * 0.04 * nat.inkTexture);
-      // Each stroke carries slightly more or less ink; pressure lightens the tone.
-      const strokeTone = 1 - 0.07 * nat.inkTexture * rng.next();
-      const toneAt = (pressure: number) => strokeTone * (1 - pen.pressureTone * (1 - pressure) * (0.6 + 0.8 * nat.inkTexture));
-      const widths = samples.map((sample) => {
-        const fromEnd = Math.min(sample.s, length - sample.s);
-        return Math.max(0.6, strokeWidth * pressureFactor(pen, sample.p) * taperFactor(fromEnd, taperLength));
-      });
-
-      if (samples.length === 1) {
-        ctx.fillStyle = toneStyle(toneAt(samples[0].p));
-        ctx.beginPath();
-        ctx.arc(samples[0].x, samples[0].y, widths[0] / 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      for (let i = 1; i < samples.length; i++) {
-        ctx.strokeStyle = toneStyle(toneAt((samples[i - 1].p + samples[i].p) / 2));
-        ctx.lineWidth = (widths[i - 1] + widths[i]) / 2;
-        ctx.beginPath();
-        ctx.moveTo(samples[i - 1].x, samples[i - 1].y);
-        ctx.lineTo(samples[i].x, samples[i].y);
-        ctx.stroke();
-      }
-      if (pen.startBlob > 0) {
-        // The pen rests a moment where it lands: a little wider and full tone.
-        const blob = (widths[0] / 2) * (1 + pen.startBlob * (0.5 + rng.next()));
-        ctx.fillStyle = toneStyle(1);
-        ctx.beginPath();
-        ctx.arc(samples[0].x, samples[0].y, blob, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    });
-  }
-
-  // 2. Paper grain: the same paper under every stroke.
-  const grainStrength = Math.min(1, pen.grain * (0.4 + 0.9 * nat.inkTexture));
-  if (grainStrength > 0) {
-    const pattern = ctx.createPattern(grainTexture(options.seed), "repeat");
-    if (pattern) {
-      const texel = GRAIN_TEXEL_MM * pxPerMm;
-      const rng = createRng(deriveSeed(options.seed, "grain-offset"));
-      pattern.setTransform(new DOMMatrix().translate(rng.next() * GRAIN_SIZE * texel, rng.next() * GRAIN_SIZE * texel).scale(texel));
-      ctx.globalCompositeOperation = "multiply";
-      ctx.globalAlpha = grainStrength;
-      ctx.fillStyle = pattern;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.globalAlpha = 1;
+  const widths: number[] = [];
+  const tones: number[] = [];
+  for (const sample of samples) {
+    const fromEnd = Math.min(sample.s, length - sample.s);
+    const bump = 1 + edge(sample.s) * edgeAmount;
+    widths.push(Math.max(0.6, strokeWidth * pressureFactor(pen, sample.p) * taperFactor(fromEnd, taperLength) * bump));
+    let tone = strokeTone * (1 - pen.pressureTone * (1 - sample.p) * (0.6 + 0.8 * nat.inkTexture));
+    if (skipLevel > 0) {
+      // An old pen leaves gaps and faint stretches; worse in long, fast strokes.
+      // Sharp gaps with a faint trace left in them, like a dry ballpoint.
+      const n = (skips(sample.s) + 1) / 2;
+      const threshold = skipLevel * 0.75;
+      const k = Math.max(0, Math.min(1, (n - threshold + 0.08) / 0.08));
+      tone *= 0.06 + 0.94 * k * k;
     }
+    tones.push(tone);
   }
+  return {
+    samples,
+    widths,
+    tones,
+    startBlob: pen.startBlob > 0 ? (widths[0] / 2) * (1 + pen.startBlob * (0.5 + rng.next())) : 0,
+    endBlob: pen.endBlob > 0 ? (widths[widths.length - 1] / 2) * (1 + pen.endBlob * (0.3 + rng.next())) : 0,
+  };
+}
 
-  // 3. Soft edges (pencil, ballpoint), still on the opaque mask.
-  const softPx = pen.softnessMm * pxPerMm;
-  if (softPx > 0.35) {
-    ctx.globalCompositeOperation = "copy";
-    ctx.filter = `blur(${softPx.toFixed(2)}px)`;
-    ctx.drawImage(canvas, 0, 0);
-    ctx.filter = "none";
+/** Draws a stroke as tone (grey levels) with "lighten", so it never darkens itself. */
+function drawTone(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
+  const { samples, widths, tones } = g;
+  if (samples.length === 1) {
+    ctx.fillStyle = toneStyle(tones[0]);
+    ctx.beginPath();
+    ctx.arc(samples[0].x - dx, samples[0].y - dy, widths[0] / 2, 0, Math.PI * 2);
+    ctx.fill();
   }
+  for (let i = 1; i < samples.length; i++) {
+    ctx.strokeStyle = toneStyle((tones[i - 1] + tones[i]) / 2);
+    ctx.lineWidth = (widths[i - 1] + widths[i]) / 2;
+    ctx.beginPath();
+    ctx.moveTo(samples[i - 1].x - dx, samples[i - 1].y - dy);
+    ctx.lineTo(samples[i].x - dx, samples[i].y - dy);
+    ctx.stroke();
+  }
+  // The pen rests a moment where it lands and lifts: a little ink pools there.
+  const last = samples[samples.length - 1];
+  if (g.startBlob > 0) {
+    ctx.fillStyle = toneStyle(Math.max(tones[0], 0.9));
+    ctx.beginPath();
+    ctx.arc(samples[0].x - dx, samples[0].y - dy, g.startBlob, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (g.endBlob > 0) {
+    ctx.fillStyle = toneStyle(tones[tones.length - 1]);
+    ctx.beginPath();
+    ctx.arc(last.x - dx, last.y - dy, g.endBlob, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
 
-  // 4. Mask to coloured ink, in bands.
-  ctx.globalCompositeOperation = "source-over";
-  const [r, g, b] = parseHex(options.color);
-  const opacity = Math.max(0, Math.min(1, pen.opacity));
-  const white = options.background === "white";
-  for (let top = 0; top < canvas.height; top += BAND_ROWS) {
-    const rows = Math.min(BAND_ROWS, canvas.height - top);
-    const band = ctx.getImageData(0, top, canvas.width, rows);
+/** Multiplies the paper grain over a tone mask; offsets keep it fixed to the page. */
+function applyGrain(ctx: CanvasRenderingContext2D, options: RenderOptions, offsetX: number, offsetY: number, width: number, height: number): void {
+  const { pen, naturalness: nat, pxPerMm } = options;
+  const strength = Math.min(1, pen.grain * (0.4 + 0.9 * nat.inkTexture));
+  if (strength <= 0) return;
+  const pattern = ctx.createPattern(grainTexture(options.seed), "repeat");
+  if (!pattern) return;
+  const texel = GRAIN_TEXEL_MM * pen.grainScale * pxPerMm;
+  const rng = createRng(deriveSeed(options.seed, "grain-offset", options.pageIndex));
+  pattern.setTransform(
+    new DOMMatrix().translate(rng.next() * GRAIN_SIZE * texel - offsetX, rng.next() * GRAIN_SIZE * texel - offsetY).scale(texel),
+  );
+  ctx.save();
+  ctx.globalCompositeOperation = "multiply";
+  ctx.globalAlpha = strength;
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+}
+
+function softPx(options: RenderOptions): number {
+  return options.pen.softnessMm * options.pxPerMm;
+}
+
+/** Converts a tone mask region into coloured ink (in place). */
+function toneToInk(ctx: CanvasRenderingContext2D, box: InkBox, color: string, opacity: number, onWhite: boolean): void {
+  const [r, g, b] = parseHex(color);
+  for (let top = box.y; top < box.y + box.height; top += BAND_ROWS) {
+    const rows = Math.min(BAND_ROWS, box.y + box.height - top);
+    const band = ctx.getImageData(box.x, top, box.width, rows);
     const data = band.data;
     for (let i = 0; i < data.length; i += 4) {
       const a = (data[i] / 255) * opacity;
-      if (white) {
-        // Ink over white paper.
+      if (onWhite) {
         data[i] = Math.round(255 + (r - 255) * a);
         data[i + 1] = Math.round(255 + (g - 255) * a);
         data[i + 2] = Math.round(255 + (b - 255) * a);
@@ -232,6 +269,157 @@ export function renderPage(
         data[i + 3] = Math.round(a * 255);
       }
     }
-    ctx.putImageData(band, 0, top);
+    ctx.putImageData(band, box.x, top);
   }
+}
+
+function clampBox(box: InkBox, width: number, height: number): InkBox | null {
+  const x = Math.max(0, Math.floor(box.x));
+  const y = Math.max(0, Math.floor(box.y));
+  const x1 = Math.min(width, Math.ceil(box.x + box.width));
+  const y1 = Math.min(height, Math.ceil(box.y + box.height));
+  return x1 > x && y1 > y ? { x, y, width: x1 - x, height: y1 - y } : null;
+}
+
+let scratch: HTMLCanvasElement | null = null;
+function scratchCanvas(width: number, height: number): HTMLCanvasElement {
+  if (!scratch || scratch.width < width || scratch.height < height) {
+    scratch = createCanvas(Math.max(width, scratch?.width ?? 0), Math.max(height, scratch?.height ?? 0));
+  }
+  return scratch;
+}
+
+/** Renders one page and returns the box that holds its ink (null if empty). */
+export function renderPage(
+  canvas: HTMLCanvasElement,
+  layout: LayoutResult,
+  hand: Hand,
+  page: PageSettings,
+  options: RenderOptions,
+): InkBox | null {
+  const { pxPerMm, pen, naturalness: nat } = options;
+  canvas.width = Math.round(page.widthMm * pxPerMm);
+  canvas.height = Math.round(page.heightMm * pxPerMm);
+  const ctx = canvas.getContext("2d")!;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.filter = "none";
+  ctx.globalAlpha = 1;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const onWhite = options.background === "white";
+
+  // Geometry of every stroke on this page.
+  const strokes: StrokeGeometry[] = [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const glyph of layout.glyphs) {
+    if (glyph.page !== options.pageIndex) continue;
+    const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
+    if (!variant) continue;
+    variant.strokes.forEach((stroke, strokeIndex) => {
+      if (stroke.length === 0) return;
+      const rng = createRng(deriveSeed(glyph.seed, "stroke", strokeIndex));
+      const points = stroke.map((point) => {
+        const mapped = glyphPointToPage(glyph, page.xHeightMm, point.x, point.y);
+        return { x: mapped.x * pxPerMm, y: mapped.y * pxPerMm, p: point.p };
+      });
+      const g = strokeGeometry(points, rng, pen, nat, pxPerMm, page.xHeightMm);
+      const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx(options) * 3 + 2;
+      for (const s of g.samples) {
+        minX = Math.min(minX, s.x - pad);
+        minY = Math.min(minY, s.y - pad);
+        maxX = Math.max(maxX, s.x + pad);
+        maxY = Math.max(maxY, s.y + pad);
+      }
+      strokes.push(g);
+    });
+  }
+
+  ctx.globalCompositeOperation = "source-over";
+  if (onWhite) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  if (strokes.length === 0) return null;
+  const box = clampBox({ x: minX, y: minY, width: maxX - minX, height: maxY - minY }, canvas.width, canvas.height);
+  if (!box) return null;
+  const opacity = Math.max(0, Math.min(1, pen.opacity));
+
+  if (pen.buildsUp) {
+    // Markers: every stroke is its own translucent layer, so crossings darken.
+    for (const g of strokes) {
+      const pad = 3 + Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx(options) * 3;
+      const xs = g.samples.map((sample) => sample.x);
+      const ys = g.samples.map((sample) => sample.y);
+      const sb = clampBox(
+        { x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, width: Math.max(...xs) - Math.min(...xs) + 2 * pad, height: Math.max(...ys) - Math.min(...ys) + 2 * pad },
+        canvas.width,
+        canvas.height,
+      );
+      if (!sb) continue;
+      const { x: sx, y: sy, width: w, height: h } = sb;
+      const work = scratchCanvas(w, h);
+      const wctx = work.getContext("2d")!;
+      wctx.setTransform(1, 0, 0, 1, 0, 0);
+      wctx.globalAlpha = 1;
+      wctx.globalCompositeOperation = "source-over";
+      wctx.fillStyle = "#000000";
+      wctx.fillRect(0, 0, w, h);
+      wctx.globalCompositeOperation = "lighten";
+      wctx.lineCap = "round";
+      wctx.lineJoin = "round";
+      drawTone(wctx, g, sx, sy);
+      applyGrain(wctx, options, sx, sy, w, h);
+      toneToInk(wctx, { x: 0, y: 0, width: w, height: h }, options.color, opacity, false);
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      const soft = softPx(options);
+      if (soft > 0.35) ctx.filter = `blur(${soft.toFixed(2)}px)`;
+      ctx.drawImage(work, 0, 0, w, h, sx, sy, w, h);
+      ctx.restore();
+    }
+    return box;
+  }
+
+  // 1. Tone mask inside the ink box: black = no ink, white = full ink.
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(box.x, box.y, box.width, box.height);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(box.x, box.y, box.width, box.height);
+  ctx.clip();
+  ctx.globalCompositeOperation = "lighten";
+  for (const g of strokes) drawTone(ctx, g, 0, 0);
+  ctx.restore();
+
+  // 2. Paper grain: the same paper under every stroke.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(box.x, box.y, box.width, box.height);
+  ctx.clip();
+  applyGrain(ctx, options, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  // 3. Soft edges (pencil, ballpoint), still on the opaque mask.
+  const soft = softPx(options);
+  if (soft > 0.35) {
+    const copy = createCanvas(box.width, box.height);
+    copy.getContext("2d")!.drawImage(canvas, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(box.x, box.y, box.width, box.height);
+    ctx.filter = `blur(${soft.toFixed(2)}px)`;
+    ctx.drawImage(copy, box.x, box.y);
+    ctx.restore();
+  }
+
+  // 4. Mask to coloured ink, only inside the box.
+  ctx.globalCompositeOperation = "source-over";
+  toneToInk(ctx, box, options.color, opacity, onWhite);
+  return box;
 }

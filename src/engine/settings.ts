@@ -26,7 +26,8 @@ export const A4: PageSettings = {
   marginTopMm: 25,
   marginBottomMm: 20,
   xHeightMm: 2.8,
-  lineSpacingMm: 8.5,
+  // Measured on real handwritten letters: about 2.7 mm x-height and 10 mm between lines.
+  lineSpacingMm: 9.5,
   letterSpacing: 0.14,
   wordSpacing: 1.2,
 };
@@ -44,6 +45,10 @@ export interface Naturalness {
   edgeShrink: number;
   marginDrift: number;
   inkTexture: number;
+  /** The writer's habit of writing uphill (positive) or downhill, in degrees. */
+  lineSlope: number;
+  /** An old pen that skips: gaps and faint stretches inside the line (0–1). */
+  inkSkips: number;
 }
 
 export interface Preset {
@@ -67,6 +72,8 @@ export const PRESETS: Preset[] = [
       edgeShrink: 0.2,
       marginDrift: 0.15,
       inkTexture: 0.35,
+      lineSlope: 0,
+      inkSkips: 0,
     },
   },
   {
@@ -83,6 +90,8 @@ export const PRESETS: Preset[] = [
       edgeShrink: 0.45,
       marginDrift: 0.35,
       inkTexture: 0.5,
+      lineSlope: 0,
+      inkSkips: 0,
     },
   },
   {
@@ -99,6 +108,8 @@ export const PRESETS: Preset[] = [
       edgeShrink: 0.75,
       marginDrift: 0.6,
       inkTexture: 0.65,
+      lineSlope: 0,
+      inkSkips: 0,
     },
   },
 ];
@@ -108,9 +119,6 @@ export const DEFAULT_PRESET_ID = "normal";
 export function presetById(id: string): Preset {
   return PRESETS.find((preset) => preset.id === id) ?? PRESETS[1];
 }
-
-/** The "Aleatorio" mode: values come from the version seed. */
-export const RANDOM_PRESET_ID = "random";
 
 /**
  * Believable imperfections for one page. A single "hurry" level for the
@@ -128,5 +136,8 @@ export function randomNaturalness(seed: number): Naturalness {
     const value = careful[key] + (hurried[key] - careful[key]) * t;
     result[key] = key === "slantDegrees" ? Math.round(value + (rng.next() - 0.5) * 3) : Math.round(value * 100) / 100;
   }
+  // A gentle habit of writing uphill or downhill; the pen never skips by chance.
+  result.lineSlope = Math.round((rng.next() * 2 - 1) * 10) / 10;
+  result.inkSkips = 0;
   return result;
 }

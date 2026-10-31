@@ -142,21 +142,48 @@ describe("layout", () => {
   });
 
   it("with no imperfections, letters sit exactly on straight lines", () => {
-    const none = { ...nat, sizeVariation: 0, rotation: 0, slantDegrees: 0, slantVariation: 0, baselineWobble: 0, lineDrift: 0, spacingVariation: 0, edgeShrink: 0, marginDrift: 0 };
+    const none = { ...nat, sizeVariation: 0, rotation: 0, slantDegrees: 0, slantVariation: 0, baselineWobble: 0, lineDrift: 0, spacingVariation: 0, edgeShrink: 0, marginDrift: 0, lineSlope: 0 };
     const result = layoutText("uno dos tres", hand, A4, none, 5);
     const ys = new Set(result.glyphs.map((g) => g.yMm.toFixed(6)));
     expect(ys.size).toBe(1);
     expect(result.glyphs[0].xMm).toBe(A4.marginLeftMm);
   });
 
-  it("reports missing characters and overflow", () => {
+  it("reports missing characters and continues on new pages", () => {
     const result = layoutText("xyz ".repeat(2000), hand, A4, nat, 1);
     expect(result.missing).toEqual(["x", "y"]);
-    expect(result.overflow).toBe(true);
+    expect(result.overflow).toBe(false);
+    expect(result.pageCount).toBeGreaterThan(1);
+    expect(Math.max(...result.glyphs.map((g) => g.page))).toBe(result.pageCount - 1);
+    for (const glyph of result.glyphs) expect(glyph.yMm).toBeLessThan(A4.heightMm - A4.marginBottomMm + 5);
+  });
+
+  it("gives a cursor position for every character, in reading order", () => {
+    const sample = "uno dos\n\ntres  cuatro";
+    const result = layoutText(sample, hand, A4, nat, 4);
+    expect(result.carets).toHaveLength(sample.length + 1);
+    for (const stop of result.carets) expect(stop).toBeDefined();
+    // Same line: the cursor moves right; after a line break it goes down.
+    expect(result.carets[1].xMm).toBeGreaterThan(result.carets[0].xMm);
+    expect(result.carets[8].line).toBe(result.carets[0].line + 1);
+    expect(result.carets[9].line).toBe(result.carets[0].line + 2);
+    expect(result.carets[9].yMm).toBeGreaterThan(result.carets[0].yMm);
+  });
+
+  it("typing a word does not rewrite the other words", () => {
+    const before = layoutText("uno dos tres cuatro", hand, A4, nat, 9);
+    const after = layoutText("uno dos diez tres cuatro", hand, A4, nat, 9);
+    const word = (r: typeof before, from: number, n: number) => r.glyphs.slice(from, from + n).map((g) => [g.scale, g.rotation, g.shear, g.seed]);
+    // "tres cuatro" keeps its size, angle and ink, only its position moves.
+    // (A drawing may still change when the new word uses the same letter just before it.)
+    expect(word(after, 10, 10)).toEqual(word(before, 6, 10));
+    const variants = (r: typeof before, from: number) => r.glyphs.slice(from).map((g) => g.variantIndex);
+    const same = variants(after, 10).filter((v, i) => v === variants(before, 6)[i]).length;
+    expect(same).toBeGreaterThanOrEqual(8);
   });
 
   it("maps glyph points onto the page with y growing downwards", () => {
-    const glyph = { char: "a", variantIndex: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1 };
+    const glyph = { char: "a", variantIndex: 0, page: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1 };
     expect(glyphPointToPage(glyph, 3, 0, 1)).toEqual({ x: 50, y: 97 });
   });
 });
@@ -189,7 +216,11 @@ describe("random preset", () => {
       const values = randomNaturalness(seed);
       expect(randomNaturalness(seed)).toEqual(values);
       for (const key of Object.keys(careful) as (keyof typeof careful)[]) {
-        if (key === "slantDegrees") {
+        if (key === "lineSlope") {
+          expect(Math.abs(values[key])).toBeLessThanOrEqual(1);
+        } else if (key === "inkSkips") {
+          expect(values[key]).toBe(0);
+        } else if (key === "slantDegrees") {
           expect(values[key]).toBeGreaterThanOrEqual(-2);
           expect(values[key]).toBeLessThanOrEqual(6);
         } else {

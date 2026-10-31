@@ -127,6 +127,10 @@ body {
   margin: 4px 0 10px;
 }
 
+.field-label.first {
+  margin-top: 0;
+}
+
 .field-label {
   display: block;
   font-weight: 600;
@@ -497,13 +501,114 @@ textarea.text-input {
   border-radius: var(--radius);
 }
 
+.preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preview-hint {
+  margin: 0 0 8px;
+}
+
+.pages {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  padding: 24px;
+  width: fit-content;
+  min-width: 100%;
+}
+
 .sheet-paper {
   position: relative;
-  width: fit-content;
-  margin: 24px auto;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 6px 18px rgba(0, 0, 0, 0.08);
   line-height: 0;
   background: #ffffff;
+  cursor: text;
+  flex-shrink: 0;
+}
+
+.sheet-canvas {
+  display: block;
+}
+
+.page-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* The real text box is invisible: it only receives the keyboard. */
+.editor-input {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+.editor-caret {
+  position: absolute;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: caret-blink 1.05s steps(1) infinite;
+}
+
+.editor-caret.solid {
+  animation: none;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.selection-band {
+  position: absolute;
+  background: rgba(42, 71, 166, 0.2);
+  border-radius: 2px;
+}
+
+.selection-band.inactive {
+  background: rgba(95, 102, 114, 0.16);
+}
+
+.missing-mark {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #d08a1f;
+  border-radius: 3px;
+  background: rgba(255, 196, 92, 0.16);
+  color: #a86a0e;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+}
+
+.editor-placeholder {
+  position: absolute;
+  color: #b3b9c4;
+  font-style: italic;
+  white-space: nowrap;
+  line-height: 1;
 }
 
 .sheet-empty {
@@ -686,7 +791,7 @@ textarea.text-input {
   transform: translate(-50%, 0);
 }
 
-/* ---------- Printing: only the page, at true size ---------- */
+/* ---------- Printing: only the pages, at true size ---------- */
 
 #print-root {
   display: none;
@@ -715,9 +820,20 @@ textarea.text-input {
     display: block;
   }
 
-  #print-sheet {
-    display: block;
+  .print-page {
+    position: relative;
     width: 210mm;
     height: 297mm;
+    overflow: hidden;
+    break-after: page;
+  }
+
+  .print-page:last-child {
+    break-after: auto;
+  }
+
+  .print-ink {
+    position: absolute;
+    display: block;
   }
 }

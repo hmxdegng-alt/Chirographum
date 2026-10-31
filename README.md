@@ -6,13 +6,13 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 
 *A text editor that writes and prints in your own handwriting. Free and open source (AGPL-3.0). Interface in Spanish until version 1.0.*
 
-## Estado: Fase 0 · prueba de realismo
+## Estado: Fase 1 · versión de prueba
 
-Esta versión sirve para comprobar si el resultado engaña antes de construir el editor completo. Permite:
-
-- **Tu letra:** dibujar con el ratón, el trackpad o un lápiz digital cada letra de una frase de prueba, varias veces. Incluye guías, letra de referencia, suavizado contra el temblor y presión simulada por la velocidad.
-- **Hoja:** escribir un texto en A4 con tu letra, con boli de gel, bola o lápiz HB, y con imperfecciones ajustables: tamaño, rotación, inclinación, líneas que se tuercen, margen que se desplaza, letra que encoge al llegar al borde y textura de la tinta. El preset **Aleatorio** elige valores creíbles distintos en cada versión.
-- **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp).
+- **Tu letra:** dibuja con el ratón, el trackpad o un lápiz digital cada letra varias veces. Cada letra aparece en varios huecos con una letra fantasma de guía; pulsa **Intro** para guardarlos todos. Con **Ctrl + rueda** haces zoom.
+- **Hoja:** haz clic en la hoja y escribe directamente, como en un procesador de textos: cursor, selección con el ratón, flechas, Inicio/Fin, copiar, pegar y deshacer. Cuando una página se llena, el texto sigue en la siguiente.
+- **Instrumentos:** gel 0,7 y 0,5, bola, rotulador fino y mediano (la tinta se oscurece al cruzarse, como en la realidad), lápiz HB y portaminas. Ajustados con escaneos de escritura real.
+- **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, y un botón **Aleatorio**.
+- **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp), todas las páginas.
 - **Guardar y abrir tu mano** como archivo `.chmano`.
 
 ## Descargar e instalar (Windows)
@@ -21,7 +21,7 @@ Esta versión sirve para comprobar si el resultado engaña antes de construir el
 2. Ábrelo. Windows avisará de «aplicación no reconocida» porque el programa no tiene firma digital (es de pago): pulsa **Más información** y después **Ejecutar de todas formas**.
 3. Sigue el instalador.
 
-Las actualizaciones se instalan igual: descargando el instalador nuevo.
+Las actualizaciones se instalan igual: descargando el instalador nuevo. Tus letras, textos y ajustes se guardan en `%APPDATA%\Chirographum` y se conservan al actualizar. Al desinstalar, el programa te pregunta si quieres borrarlos también.
 
 ## Cómo hacer la prueba de realismo
 
