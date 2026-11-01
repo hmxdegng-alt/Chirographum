@@ -3,6 +3,7 @@
 
 import { bridge, loadPreference, savePreference } from "../bridge";
 import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids";
+import type { ChiroDocument, SheetSettings } from "../engine/document";
 import { charactersNeeded, type Hand } from "../engine/hand";
 import { defaultCharIds, layoutText, normaliseText, type LayoutResult } from "../engine/layout";
 import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, PENS, penById } from "../engine/pens";
@@ -58,7 +59,20 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "inkSkips",
 ];
 
-export function createSheetView(store: Store): { root: HTMLElement; onShow: () => void } {
+/** What the document controller needs from the sheet. */
+export interface SheetDocumentApi {
+  getDocument(): ChiroDocument;
+  /** Shows a document (or an empty one) without counting it as a change. */
+  loadDocument(doc: ChiroDocument): void;
+  currentSettings(): SheetSettings;
+  onChange(listener: () => void): void;
+  /** Writes pending changes to storage now (before the window closes). */
+  flush(): void;
+  print(): Promise<void>;
+  exportPdf(): Promise<void>;
+}
+
+export function createSheetView(store: Store): { root: HTMLElement; onShow: () => void; document: SheetDocumentApi } {
   let penId = loadPreference("sheet.pen", DEFAULT_PEN_ID);
   let inkColor = loadPreference("sheet.color", INK_COLORS[0].value);
   let recentColors = loadPreference<string[]>("sheet.recentColors", []);
@@ -74,7 +88,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** What each page canvas shows, to redraw only the pages that changed. */
   let drawnSignatures: string[] = [];
 
+  const changeListeners = new Set<() => void>();
+  /** True while a document is being shown: those updates are not edits. */
+  let applyingDocument = false;
+  const changed = () => {
+    if (!applyingDocument) for (const listener of changeListeners) listener();
+  };
+
   const persist = () => {
+    changed();
     savePreference("sheet.pen", penId);
     savePreference("sheet.color", inkColor);
     savePreference("sheet.recentColors", recentColors);
@@ -116,6 +138,17 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   // ----- Pages -----
   let textSaveTimer: number | undefined;
+  const saveTextNow = () => {
+    window.clearTimeout(textSaveTimer);
+    savePreference("sheet.text", lastText);
+    savePreference("sheet.textIds", charIds);
+  };
+  const saveTextSoon = () => {
+    window.clearTimeout(textSaveTimer);
+    textSaveTimer = window.setTimeout(saveTextNow, 300);
+  };
+  // Closing right after typing must not lose the last letters.
+  window.addEventListener("pagehide", saveTextNow);
   const editor = createPageEditor({
     initialText,
     onInput: (raw) => {
@@ -123,11 +156,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       charIds = idsAfterEdit(text);
       lastText = text;
       remember(text, charIds);
-      window.clearTimeout(textSaveTimer);
-      textSaveTimer = window.setTimeout(() => {
-        savePreference("sheet.text", text);
-        savePreference("sheet.textIds", charIds);
-      }, 300);
+      saveTextSoon();
+      changed();
       relayout();
       scheduleRender(TYPING_RENDER_DELAY);
     },
@@ -222,8 +252,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     customColor.setDisabled(disabled);
   }
 
+  const tuningSetters = new Map<keyof typeof penTuning, (value: number) => void>();
+  const pageSetters = new Map<keyof PageSettings, (value: number) => void>();
+  const remembered = <T>(map: Map<T, (value: number) => void>, key: T, control: { root: HTMLElement; set: (value: number) => void }) => {
+    map.set(key, control.set);
+    return control.root;
+  };
+
   const tuningSlider = (label: string, key: keyof typeof penTuning, min: number, max: number) =>
-    slider({
+    remembered(tuningSetters, key, slider({
       label,
       min,
       max,
@@ -235,13 +272,13 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         persist();
         scheduleRender();
       },
-    }).root;
+    }));
 
   /** Spacing is stored in x-heights; shown in millimetres at the current letter size. */
   const spacingFormat = (value: number) => mmFormat(value * page.xHeightMm);
 
   const pageSlider = (label: string, key: keyof PageSettings, min: number, max: number, step: number, format = mmFormat) =>
-    slider({
+    remembered(pageSetters, key, slider({
       label,
       min,
       max,
@@ -254,7 +291,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         relayout();
         scheduleRender();
       },
-    }).root;
+    }));
 
   const presetSelect = h("select", { class: "select", "aria-label": es.sheet.preset });
   for (const preset of PRESETS) presetSelect.append(h("option", { value: preset.id }, preset.label));
@@ -536,8 +573,52 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   renderSwatches();
 
+  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed });
+
+  const documentApi: SheetDocumentApi = {
+    getDocument: () => ({ text: lastText, charIds, settings: currentSettings() }),
+    currentSettings,
+    loadDocument(doc) {
+      applyingDocument = true;
+      try {
+        penId = penById(doc.settings.penId).id;
+        inkColor = doc.settings.inkColor;
+        penTuning = { ...doc.settings.penTuning };
+        page = { ...doc.settings.page };
+        presetId = doc.settings.presetId === "random" ? "custom" : doc.settings.presetId;
+        seed = doc.settings.seed;
+        penSelect.value = penId;
+        customColor.setColor(inkColor);
+        renderSwatches();
+        for (const [key, set] of tuningSetters) set(penTuning[key]);
+        for (const [key, set] of pageSetters) set(page[key]);
+        setNaturalness(doc.settings.naturalness);
+        presetSelect.value = presetId;
+        versionLabel.textContent = es.sheet.version(seed);
+        lastText = doc.text;
+        charIds = doc.charIds.length === doc.text.length ? doc.charIds : defaultCharIds(doc.text);
+        history.clear();
+        remember(lastText, charIds);
+        editor.setText(lastText);
+        persist();
+        saveTextNow();
+        drawnSignatures = [];
+        relayout();
+        zoom.refit();
+        scheduleRender(0);
+      } finally {
+        applyingDocument = false;
+      }
+    },
+    onChange: (listener) => changeListeners.add(listener),
+    flush: saveTextNow,
+    print: () => output("print"),
+    exportPdf: () => output("pdf"),
+  };
+
   return {
     root,
+    document: documentApi,
     onShow() {
       relayout();
       // The preview only has a size once the view is visible.

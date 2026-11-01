@@ -12,6 +12,18 @@ contextBridge.exposeInMainWorld("chirographum", {
   openHand: () => ipcRenderer.invoke("hand:open"),
   printPage: () => ipcRenderer.invoke("page:print"),
   exportPdf: () => ipcRenderer.invoke("page:exportPdf"),
+  // Documents (.chiro).
+  saveDocument: (json, filePath, suggestedName) => ipcRenderer.invoke("doc:save", json, filePath, suggestedName),
+  openDocument: () => ipcRenderer.invoke("doc:open"),
+  takePendingDocument: () => ipcRenderer.invoke("doc:takePending"),
+  askUnsavedChanges: (name) => ipcRenderer.invoke("doc:askUnsaved", name),
+  reportDocumentState: (dirty, name) => ipcRenderer.send("doc:state", Boolean(dirty), String(name)),
+  closeApp: () => ipcRenderer.send("app:close"),
+  // Same as clicking the window's X (asks about unsaved changes). Used by tests.
+  requestClose: () => ipcRenderer.send("app:requestClose"),
+  onMenuCommand: (callback) => {
+    ipcRenderer.on("menu:command", (_event, command) => callback(String(command)));
+  },
   // Ticks of the "Ver" menu.
   setViewOption: (name, value) => ipcRenderer.send("view:set", String(name), Boolean(value)),
   onViewOption: (callback) => {

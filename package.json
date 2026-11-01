@@ -1,7 +1,7 @@
 {
   "name": "chirographum",
   "productName": "Chirographum",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Editor de texto que escribe e imprime con tu propia letra.",
   "author": "Chirographum contributors",
   "license": "AGPL-3.0-only",
@@ -59,6 +59,15 @@
       "language": "3082",
       "artifactName": "Chirographum-Setup-${version}.${ext}"
     },
-    "publish": null
+    "publish": null,
+    "fileAssociations": [
+      {
+        "ext": "chiro",
+        "name": "Documento de Chirographum",
+        "description": "Documento de Chirographum",
+        "icon": "build/icon.ico",
+        "role": "Editor"
+      }
+    ]
   }
 }

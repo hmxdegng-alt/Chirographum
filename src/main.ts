@@ -4,6 +4,7 @@ import { parseHand, type Hand } from "./engine/hand";
 import { es } from "./i18n/es";
 import { initialState, Store } from "./store";
 import { h } from "./ui/dom";
+import { createDocumentController } from "./ui/document-controller";
 import { createDrawView } from "./ui/draw-view";
 import { createSheetView } from "./ui/sheet-view";
 import { connectViewMenu } from "./view-options";
@@ -32,12 +33,14 @@ async function start(): Promise<void> {
   const drawTab = tabButton("draw", es.tabs.draw);
   const sheetTab = tabButton("sheet", es.tabs.sheet);
 
+  const docLabel = h("div", { class: "doc-label" });
   const topbar = h(
     "header",
     { class: "topbar" },
     h("img", { class: "logo", src: logoUrl, alt: "" }),
     h("div", { class: "brand" }, h("span", { class: "brand-name" }, es.appName), h("span", { class: "brand-phase" }, es.phaseLabel)),
     h("nav", { class: "tabs", role: "tablist" }, drawTab, sheetTab),
+    docLabel,
   );
 
   const content = h("main", { class: "content" }, drawView.root, sheetView.root);
@@ -57,6 +60,7 @@ async function start(): Promise<void> {
     if (state.tab !== previous.tab) showTab(state.tab);
   });
   showTab(store.get().tab);
+  createDocumentController(sheetView.document, store, docLabel);
 }
 
 void start();

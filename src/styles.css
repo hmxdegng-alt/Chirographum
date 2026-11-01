@@ -101,6 +101,32 @@ body {
   font-weight: 600;
 }
 
+.doc-label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 45%;
+}
+
+.doc-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-status {
+  font-size: 12px;
+  color: #9fd3a8;
+  white-space: nowrap;
+}
+
+.doc-status.unsaved {
+  color: #f0c27a;
+}
+
 .content {
   flex: 1;
   min-height: 0;

@@ -13,6 +13,7 @@ import {
   type Hand,
 } from "../src/engine/hand";
 import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
+import { decodeIds, documentTitle, DocumentFormatError, encodeIds, parseDocument, serializeDocument } from "../src/engine/document";
 import { glyphPointToPage, layoutText } from "../src/engine/layout";
 import { createRng, deriveSeed } from "../src/engine/random";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
@@ -264,5 +265,54 @@ describe("random preset", () => {
       }
     }
     expect(randomNaturalness(1)).not.toEqual(randomNaturalness(2));
+  });
+});
+
+describe("documents", () => {
+  const defaults = {
+    penId: "gel-07",
+    inkColor: "#22399a",
+    penTuning: { widthScale: 1, inkStrength: 1 },
+    page: A4,
+    presetId: "normal",
+    naturalness: presetById("normal").values,
+    seed: 42,
+  };
+
+  it("keeps letter identities exactly", () => {
+    const ids = [0, 1, 0xffffffff, 123456789, 2654435761];
+    expect(decodeIds(encodeIds(ids))).toEqual(ids);
+    expect(decodeIds(encodeIds([]))).toEqual([]);
+  });
+
+  it("round-trips text, identities and settings", () => {
+    const doc = {
+      text: "Querida Marta:\n\n¿Cuándo vienes?",
+      charIds: Array.from({ length: 31 }, (_, i) => (i * 2654435761) >>> 0),
+      settings: { ...defaults, penId: "fineliner", seed: 7, page: { ...A4, xHeightMm: 4 } },
+    };
+    expect(doc.text.length).toBe(31);
+    expect(parseDocument(serializeDocument(doc), defaults)).toEqual(doc);
+  });
+
+  it("fills settings an older file does not have", () => {
+    const old = JSON.stringify({ format: "chirographum-document", version: 1, text: "hola", settings: { penId: "gel-05", naturalness: { rotation: 0.9 } } });
+    const doc = parseDocument(old, defaults);
+    expect(doc.settings.penId).toBe("gel-05");
+    expect(doc.settings.naturalness.rotation).toBe(0.9);
+    expect(doc.settings.naturalness.lineSlope).toBe(0);
+    expect(doc.settings.page).toEqual(A4);
+    expect(doc.charIds).toEqual([]);
+  });
+
+  it("rejects files that are not documents", () => {
+    expect(() => parseDocument("{", defaults)).toThrow(DocumentFormatError);
+    expect(() => parseDocument(JSON.stringify({ format: "chirographum-hand" }), defaults)).toThrow(DocumentFormatError);
+    expect(() => parseDocument(JSON.stringify({ format: "chirographum-document", version: 99, text: "" }), defaults)).toThrow(DocumentFormatError);
+  });
+
+  it("shows the file name without folder or extension", () => {
+    expect(documentTitle("C:\\Users\\andre\\Carta a Marta.chiro")).toBe("Carta a Marta");
+    expect(documentTitle(null)).toBeNull();
   });
 });

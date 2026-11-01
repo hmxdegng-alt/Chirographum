@@ -19,6 +19,8 @@ export interface PageEditor {
   root: HTMLElement;
   pages(): HTMLCanvasElement[];
   text(): string;
+  /** Replaces the whole text (opening a document); the cursor goes to the start. */
+  setText(text: string): void;
   /** New layout (after typing or a settings change). */
   setLayout(layout: LayoutResult, page: PageSettings): void;
   /** CSS pixels per millimetre on screen. */
@@ -372,6 +374,13 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
     root,
     pages: () => pageElements.map((p) => p.canvas),
     text: () => input.value,
+    setText(text) {
+      input.value = text;
+      input.setSelectionRange(0, 0);
+      goalX = null;
+      const scroller = root.parentElement;
+      if (scroller) scroller.scrollTop = 0;
+    },
     setLayout(next, settings) {
       layout = next;
       pageSettings = settings;

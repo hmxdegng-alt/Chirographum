@@ -121,6 +121,19 @@ export const es = {
     mm: "mm",
     degrees: "°",
   },
+  document: {
+    untitled: "Sin título",
+    saved: "Guardado",
+    unsaved: "Sin guardar",
+    notSavedYet: "Todavía no se ha guardado en ningún archivo",
+    savedAs: (name: string) => `Guardado: ${name}`,
+    errors: {
+      json: "El archivo está dañado o no es un documento de Chirographum.",
+      format: "Ese archivo no es un documento de Chirographum.",
+      version: "Este documento es de una versión más nueva de Chirographum.",
+      content: "El documento tiene datos que no se entienden.",
+    },
+  },
   zoom: {
     in: "Ampliar",
     out: "Reducir",

@@ -14,6 +14,7 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 - **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, y un botón **Aleatorio**.
 - **Vista impresa** (botón sobre la hoja o menú *Ver*): imita cómo deja la tinta una impresora de chorro, calibrada con el escaneo de una hoja impresa.
 - **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp), todas las páginas.
+- **Documentos** `.chiro` (menú *Archivo*): nuevo, abrir, guardar y guardar como (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Mayús+S). Guardan el texto, el dibujo exacto de cada letra y todos los ajustes de la hoja; se escriben con la mano que tengas cargada. Si cierras con cambios sin guardar, el programa te pregunta. Doble clic en un `.chiro` lo abre.
 - **Guardar y abrir tu mano** como archivo `.chmano`.
 
 ## Descargar e instalar (Windows)
