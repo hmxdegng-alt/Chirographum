@@ -29,6 +29,7 @@ import {
   HIGHLIGHT,
   highlightColorIndex,
   rangeHasMark,
+  withHighlightColor,
   SCRIBBLE,
   SCRIBBLE_KINDS,
   scribbleFields,
@@ -40,6 +41,7 @@ import {
 } from "../src/engine/rich-text";
 import { createRng, deriveSeed } from "../src/engine/random";
 import { scribbleStrokes } from "../src/engine/scribble";
+import { sliderZone } from "../src/ui/dom";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
@@ -303,6 +305,7 @@ const documentDefaults = {
   paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, print: true },
   titleUnderline: true,
   naturalnessAmount: 1,
+  leftHanded: false,
 };
 
 describe("documents", () => {
@@ -317,6 +320,7 @@ describe("documents", () => {
     paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, print: true },
     titleUnderline: true,
     naturalnessAmount: 1,
+    leftHanded: false,
   };
 
   it("keeps letter identities exactly", () => {
@@ -566,5 +570,36 @@ describe("scribbles", () => {
     expect(scribbleStyleOf(back.runStyles[0])).toEqual({ kind: "loops", rage: 0.9, width: 1.5, perWord: true });
     const damaged = parseDocument(JSON.stringify({ format: "chirographum-document", version: 1, text: "ab", runStyles: [7, { scribbleKind: "nope", scribbleRage: 9 }] }), documentDefaults);
     expect(damaged.runStyles).toEqual([{}, { scribbleRage: 1 }]);
+  });
+});
+
+describe("highlighter", () => {
+  const hand = syntheticHand("unodstrecaiflhvz");
+  const nat = { ...presetById("normal").values, sizeVariation: 0 };
+  const text = "uno dos tres";
+
+  it("a change of colour starts a new stroke", () => {
+    const marks = Array.from(text, (_, i) => withHighlightColor(HIGHLIGHT, i < 8 ? 0 : 2));
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks });
+    const strokes = r.decorations.filter((d) => d.kind === "highlight");
+    expect(strokes.map((d) => d.color)).toEqual([0, 2]);
+  });
+
+  it("word by word lifts the highlighter at every space", () => {
+    const { marks, styles } = applyRunStyle(new Array(text.length).fill(HIGHLIGHT), [], 0, text.length, { highlightWords: true });
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks, runStyles: styles });
+    expect(r.decorations.filter((d) => d.kind === "highlight")).toHaveLength(3);
+  });
+});
+
+describe("unusual values on sliders", () => {
+  it("usual, then a short yellow stretch, then red, on both sides", () => {
+    const usual: [number, number] = [2, 5];
+    expect(sliderZone(3, usual, 0.8)).toBe("usual");
+    expect(sliderZone(5.5, usual, 0.8)).toBe("caution");
+    expect(sliderZone(6, usual, 0.8)).toBe("excess");
+    expect(sliderZone(1.5, usual, 0.8)).toBe("caution");
+    expect(sliderZone(1, usual, 0.8)).toBe("excess");
+    expect(sliderZone(100, undefined, 0.8)).toBe("usual");
   });
 });

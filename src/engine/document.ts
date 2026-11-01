@@ -27,6 +27,8 @@ export interface SheetSettings {
   titleUnderline: boolean;
   /** Overall amount of imperfections (1 = the values as they are). */
   naturalnessAmount: number;
+  /** Written with the left hand: the hand runs over what was just written. */
+  leftHanded: boolean;
 }
 
 export interface ChiroDocument {
@@ -134,6 +136,7 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
         if (finite(r.scribbleRage)) style.scribbleRage = Math.max(0, Math.min(1, r.scribbleRage));
         if (finite(r.scribbleWidth)) style.scribbleWidth = Math.max(0.3, Math.min(4, r.scribbleWidth));
         if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
+        if (typeof r.highlightWords === "boolean") style.highlightWords = r.highlightWords;
         return style;
       })
     : [];
@@ -159,6 +162,7 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
       print: typeof rawPaper.print === "boolean" ? rawPaper.print : (defaults.paper ?? DEFAULT_PAPER).print,
     },
     titleUnderline: typeof raw.titleUnderline === "boolean" ? raw.titleUnderline : defaults.titleUnderline,
+    leftHanded: typeof raw.leftHanded === "boolean" ? raw.leftHanded : (defaults.leftHanded ?? false),
     naturalnessAmount:
       typeof raw.naturalnessAmount === "number" && Number.isFinite(raw.naturalnessAmount) ? Math.max(0, Math.min(3, raw.naturalnessAmount)) : defaults.naturalnessAmount,
   };

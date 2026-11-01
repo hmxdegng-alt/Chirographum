@@ -42,6 +42,8 @@ export interface ToolbarState {
   size: number;
   /** How the selection is (or will be) scribbled out. */
   scribbleStyle: ScribbleStyle;
+  /** The selection is (or will be) highlighted word by word. */
+  highlightWords: boolean;
 }
 
 /** Sizes offered for a selection, relative to the paragraph. */
@@ -68,6 +70,29 @@ function scribblePreview(kind: ScribbleKind, rage: number): SVGSVGElement {
     path.setAttribute("d", stroke.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" "));
     svg.append(path);
   }
+  return svg;
+}
+
+/** "Borrar formato": a T with a small cross, like the usual icon. */
+function clearIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", "M2.5 3h9M7 3v10");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  const slash = document.createElementNS(SVG_NS, "path");
+  slash.setAttribute("d", "M10.5 10.5l3 3M13.5 10.5l-3 3");
+  slash.setAttribute("fill", "none");
+  slash.setAttribute("stroke", "currentColor");
+  slash.setAttribute("stroke-width", "1.4");
+  slash.setAttribute("stroke-linecap", "round");
+  svg.append(path, slash);
   return svg;
 }
 
@@ -171,7 +196,18 @@ export function createToolbar(
     };
   };
   const sendRage = settle("scribble-rage");
-  const widthSlider = slider({ label: es.toolbar.scribbleWidth, min: 0.4, max: 3, step: 0.05, value: 1, defaultValue: 1, format: percent, onInput: settle("scribble-width") });
+  const widthSlider = slider({
+    label: es.toolbar.scribbleWidth,
+    min: 0.4,
+    max: 3,
+    step: 0.05,
+    value: 1,
+    defaultValue: 1,
+    usual: [0.6, 2],
+    caution: 0.4,
+    format: percent,
+    onInput: settle("scribble-width"),
+  });
   const rageSlider = slider({
     label: es.toolbar.scribbleRage,
     min: 0,
@@ -284,12 +320,17 @@ export function createToolbar(
     colorMenu.hidden = true;
     onCommand("highlight:none");
   });
-  colorMenu.append(removeHighlight);
+  const highlightPerWord = h("input", { type: "checkbox" });
+  highlightPerWord.addEventListener("change", () => onCommand(`highlight-words:${highlightPerWord.checked ? 1 : 0}`));
+  colorMenu.append(h("label", { class: "check menu-check" }, highlightPerWord, es.toolbar.highlightPerWord), removeHighlight);
   colorToggle.addEventListener("click", () => (colorMenu.hidden = !colorMenu.hidden));
   document.addEventListener("pointerdown", (event) => {
     if (!colorMenu.hidden && !colorMenu.contains(event.target as Node) && event.target !== colorToggle) colorMenu.hidden = true;
   });
   const highlightGroup = h("div", { class: "tool-group" }, highlight, colorToggle, colorMenu);
+
+  // "Borrar formato", as in Docs: the selection back to plain text.
+  const clearFormat = tool(clearIcon(), es.toolbar.clearFormat, "format:clear", "icon");
 
   const panelButton = h("button", { type: "button", class: "tool icon panel-toggle", title: es.toolbar.panel, "aria-label": es.toolbar.panel, "aria-pressed": "true" }, panelIcon());
   panelButton.addEventListener("mousedown", (event) => event.preventDefault());
@@ -319,6 +360,7 @@ export function createToolbar(
     strike,
     scribbleGroup,
     highlightGroup,
+    clearFormat,
     separator(),
     ...aligns.map((a) => a.element),
     h("span", { class: "tool-spacer" }),
@@ -359,6 +401,7 @@ export function createToolbar(
       }
       highlightChip.style.background = HIGHLIGHT_COLORS[state.highlightColor]?.value ?? HIGHLIGHT_COLORS[0].value;
       for (const { align, element } of aligns) element.classList.toggle("active", align === state.align);
+      highlightPerWord.checked = state.highlightWords;
     },
     setPanelShown(shown) {
       panelButton.classList.toggle("active", shown);

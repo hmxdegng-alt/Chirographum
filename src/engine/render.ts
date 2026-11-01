@@ -38,6 +38,8 @@ export interface RenderOptions {
   drawPaper?: boolean;
   /** Instruments and colours chosen for parts of the text (glyph.style points here). */
   runStyles?: RunStyle[];
+  /** Left-handed writers drag the hand over fresh ink: more and longer smudges. */
+  leftHanded?: boolean;
 }
 
 /** Pixel box around all the ink of the page, or null for an empty page. */
@@ -469,6 +471,7 @@ const HIGHLIGHTER: PenModel = {
   endBlob: 0.05,
   skipProne: 0,
   smear: 0,
+  smudge: 0,
   softnessMm: 0.05,
 };
 
@@ -476,13 +479,13 @@ const HIGHLIGHTER: PenModel = {
  * A line drawn by hand under, through or over some words: it overshoots a
  * little, is never perfectly straight and lightens where the pen lifts.
  */
-function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
-  const rng = createRng(d.seed);
+function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: number; seed: number }): { x: number; y: number; p: number }[] {
+  const rng = createRng(span?.seed ?? d.seed);
   const xh = d.xhMm;
-  const length = Math.max(0.5, d.x1 - d.x0);
   const offset = d.kind === "underline" ? 0.32 * xh : d.kind === "strike" ? -0.48 * xh : -0.42 * xh;
-  const startX = d.x0 - (d.kind === "highlight" ? 0.3 : 0.1 + rng.next() * 0.4) * xh;
-  const endX = d.x1 + (d.kind === "highlight" ? 0.3 : rng.next() * 0.5) * xh;
+  const startX = span?.from ?? d.x0 - (d.kind === "highlight" ? 0.3 : 0.1 + rng.next() * 0.4) * xh;
+  const endX = span?.to ?? d.x1 + (d.kind === "highlight" ? 0.3 : rng.next() * 0.5) * xh;
+  const length = Math.max(0.5, endX - startX);
   const tilt = Math.tan((rng.next() - 0.5) * 1.4 * DEG);
   const bow = (rng.next() - 0.5) * 0.12 * xh * Math.min(1, length / 40);
   const wobble = noise1D(rng, 6);
@@ -501,6 +504,39 @@ function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: nu
 }
 
 const DEG = Math.PI / 180;
+
+/** Width of the highlighter's band, in x-heights. */
+const HIGHLIGHT_TIP = 1.35;
+
+/** How far one sweep of the highlighter goes before the hand is lifted, in millimetres. */
+const SWEEP_MM = [30, 70];
+
+/**
+ * A highlighted run the way people do it: sweeps of a few centimetres; the
+ * hand is lifted and put back a little behind where it stopped, so the
+ * restart overlaps (and shows darker) and sits at a slightly different height.
+ */
+function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean): { x: number; y: number; p: number }[][] {
+  const rng = createRng(deriveSeed(d.seed, "sweeps"));
+  const xh = d.xhMm;
+  // Word by word, the tip stops close to each word so the spaces stay clean
+  // (the round end of the stroke already reaches half the tip's width further).
+  const cap = (HIGHLIGHT_TIP / 2) * xh;
+  let start = wordByWord ? d.x0 + cap - (0.05 + 0.1 * rng.next()) * xh : d.x0 - 0.3 * xh;
+  let end = wordByWord ? d.x1 - cap + (0.05 + 0.1 * rng.next()) * xh : d.x1 + 0.3 * xh;
+  if (end - start < 0.1 * xh) start = end = (start + end) / 2;
+  const sweeps: { x: number; y: number; p: number }[][] = [];
+  let from = start;
+  for (let n = 0; n < 50; n++) {
+    let to = from + SWEEP_MM[0] + (SWEEP_MM[1] - SWEEP_MM[0]) * rng.next();
+    // No tiny last sweep: stretch this one to the end instead.
+    if (end - to < 12) to = end;
+    sweeps.push(handLine(d, pxPerMm, { from, to: Math.min(to, end), seed: deriveSeed(d.seed, "sweep", n) }));
+    if (to >= end) break;
+    from = to - (0.8 + 2.4 * rng.next());
+  }
+  return sweeps;
+}
 
 /** Translucent marker strokes on a layer of their own (layers stacked so overlaps darken). */
 function renderMarkerStrokes(
@@ -680,15 +716,16 @@ export function renderPage(
       }
       continue;
     }
-    const points = handLine(d, pxPerMm);
     if (d.kind === "highlight") {
-      const tip = { ...HIGHLIGHTER, widthMm: 1.35 * d.xhMm };
+      const tip = { ...HIGHLIGHTER, widthMm: HIGHLIGHT_TIP * d.xhMm };
       // How much ink it drags depends on the instrument underneath.
       const smear = (nat.highlighterSmear ?? 0) * groupFor(d.style ?? 0).pen.smear;
-      highlights.push({ geometry: strokeGeometry(points, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color, smear, seed: d.seed });
+      highlighterSweeps(d, pxPerMm, Boolean(d.style > 0 && runStyles[d.style - 1]?.highlightWords)).forEach((sweep, n) =>
+        highlights.push({ geometry: strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color, smear, seed: deriveSeed(d.seed, "smear", n) }),
+      );
     } else {
       const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, widthScale));
+      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale));
     }
   }
 
@@ -799,6 +836,74 @@ export function renderPage(
       ctx.drawImage(trail, hb.x, hb.y);
       ctx.restore();
       trail.width = 0;
+    }
+  }
+
+  // 1c. Smudges: now and then the writing hand rubs fresh ink or graphite. A
+  // left hand runs over what it has just written and drags it to the right;
+  // a right hand only catches the line above, down and to the right.
+  const smudging = (nat.handSmudges ?? 0) * (options.leftHanded ? 3 : 1);
+  if (box && smudging > 0.005) {
+    const STEPS = 6;
+    const left = Boolean(options.leftHanded);
+    for (const glyph of layout.glyphs) {
+      if (glyph.page !== options.pageIndex) continue;
+      const pen = groupFor(glyph.style ?? 0).pen;
+      const rng = createRng(deriveSeed(glyph.seed, "smudge"));
+      if (rng.next() > Math.min(0.5, smudging * pen.smudge * (left ? 0.027 : 0.025))) continue;
+      const xh = page.xHeightMm * glyph.scale;
+      const cx = (glyph.xMm + glyph.widthMm * (0.2 + 0.6 * rng.next())) * pxPerMm;
+      const cy = (glyph.yMm - xh * (left ? 0.2 + 0.4 * rng.next() : 0.5 + 0.5 * rng.next())) * pxPerMm;
+      const rx = xh * (left ? 0.8 + 1.0 * rng.next() : 0.7 + 0.8 * rng.next()) * pxPerMm;
+      const ry = xh * (0.45 + 0.35 * rng.next()) * pxPerMm;
+      const angle = left ? (rng.next() - 0.5) * 0.3 : Math.PI * (0.25 + 0.2 * rng.next());
+      const reach = xh * (left ? 0.6 + 1.0 * rng.next() : 0.4 + 0.7 * rng.next()) * pxPerMm;
+      const strength = (0.18 + 0.25 * rng.next()) * Math.min(1, pen.smudge);
+      const dx = Math.cos(angle) * reach;
+      const dy = Math.sin(angle) * reach;
+      const sb = clampBox({ x: cx - rx - reach, y: cy - rx - reach, width: 2 * (rx + reach), height: 2 * (rx + reach) }, canvas.width, canvas.height);
+      if (!sb) continue;
+      const patch = createCanvas(sb.width, sb.height);
+      const pctx = patch.getContext("2d")!;
+      pctx.filter = `blur(${Math.max(0.4, 0.15 * pxPerMm).toFixed(2)}px)`;
+      for (let i = 1; i <= STEPS; i++) {
+        pctx.globalAlpha = ((2 * strength) / STEPS) * (1 - (i - 1) / STEPS);
+        pctx.drawImage(canvas, sb.x - (dx * i) / STEPS, sb.y - (dy * i) / STEPS, sb.width, sb.height, 0, 0, sb.width, sb.height);
+      }
+      pctx.filter = "none";
+      pctx.globalAlpha = 1;
+      // A soft, oval patch where the skin touched.
+      pctx.globalCompositeOperation = "destination-in";
+      pctx.save();
+      pctx.translate(cx - sb.x + dx / 2, cy - sb.y + dy / 2);
+      pctx.rotate(angle);
+      pctx.scale(1, ry / rx);
+      const fade = pctx.createRadialGradient(0, 0, 0, 0, 0, rx + reach / 2);
+      fade.addColorStop(0, "rgba(0,0,0,1)");
+      fade.addColorStop(0.55, "rgba(0,0,0,0.65)");
+      fade.addColorStop(1, "rgba(0,0,0,0)");
+      pctx.fillStyle = fade;
+      const far = (rx + reach) * 4;
+      pctx.fillRect(-far, -far, 2 * far, 2 * far);
+      // The skin leaves streaks along the way it moved.
+      pctx.globalCompositeOperation = "destination-out";
+      pctx.lineCap = "round";
+      const streaks = 6 + Math.floor(rng.next() * 8);
+      for (let s = 0; s < streaks; s++) {
+        const offset = (rng.next() * 2 - 1) * rx;
+        pctx.globalAlpha = 0.3 + 0.5 * rng.next();
+        pctx.lineWidth = (0.04 + 0.12 * rng.next()) * pxPerMm;
+        pctx.beginPath();
+        pctx.moveTo(-far, offset);
+        pctx.lineTo(far, offset + (rng.next() - 0.5) * 0.2 * rx);
+        pctx.stroke();
+      }
+      pctx.restore();
+      ctx.save();
+      ctx.globalCompositeOperation = "destination-over";
+      ctx.drawImage(patch, sb.x, sb.y);
+      ctx.restore();
+      patch.width = 0;
     }
   }
 

@@ -575,10 +575,15 @@ function decorate(
       }
       // A run: same flag, same line, no line break.
       let j = i;
-      // A line is drawn with one pen: a change of instrument or colour starts a new one.
-      const sameInk = (k: number) => kind === "highlight" || styleAt(k) === styleAt(i) || /\s/.test(text[k]);
-      // Some people blot out word by word: then a space ends the scribble.
-      const wordByWord = kind === "scribble" && scribbleStyleOf(runStyles[styleAt(i) - 1]).perWord;
+      // A line is drawn with one pen: a change of instrument or colour starts a new one;
+      // the highlighter only cares about its own colour and how it is used.
+      const highlightWords = (k: number) => Boolean(runStyles[styleAt(k) - 1]?.highlightWords);
+      const sameInk = (k: number) =>
+        kind === "highlight"
+          ? highlightColorIndex(marks[k] ?? 0) === highlightColorIndex(marks[i] ?? 0) && highlightWords(k) === highlightWords(i)
+          : styleAt(k) === styleAt(i) || /\s/.test(text[k]);
+      // Some people blot out or highlight word by word: then a space ends the line.
+      const wordByWord = kind === "scribble" ? scribbleStyleOf(runStyles[styleAt(i) - 1]).perWord : kind === "highlight" && highlightWords(i);
       if (wordByWord && /\s/.test(text[i])) {
         i++;
         continue;

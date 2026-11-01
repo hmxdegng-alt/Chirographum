@@ -17,8 +17,10 @@ import {
   diffTexts,
   encodeParagraph,
   HIGHLIGHT,
+  HIGHLIGHT_COLORS,
   highlightColorIndex,
   ITALIC,
+  NORMAL_PARAGRAPH,
   paragraphCount,
   paragraphsInRange,
   DEFAULT_SCRIBBLE,
@@ -34,6 +36,7 @@ import {
   updateMarks,
   updateParagraphs,
   upgradeMarkV1,
+  withHighlightColor,
   withRunStyle,
   type Alignment,
   type ParagraphStyle,
@@ -101,6 +104,33 @@ const slopeFormat = (value: number) =>
 /** Imperfection sliders go up to 300 %: 100 % is a lot already, beyond is for whoever wants it. */
 const NATURAL_MAX = 3;
 
+type UsualRange = { usual: [number, number]; caution: number };
+/**
+ * What people usually choose. Past it a slider turns yellow for a short
+ * stretch and then red: only a hint, every value still works.
+ */
+const USUAL: Record<string, UsualRange> = {
+  widthScale: { usual: [0.65, 1.6], caution: 0.25 },
+  inkStrength: { usual: [0.55, 1.2], caution: 0.15 },
+  xHeightMm: { usual: [2, 5], caution: 0.8 },
+  lineSpacingMm: { usual: [6.5, 14], caution: 2 },
+  letterSpacing: { usual: [-0.05, 0.5], caution: 0.15 },
+  wordSpacing: { usual: [0.7, 2.4], caution: 0.5 },
+  marginLeftMm: { usual: [8, 45], caution: 4 },
+  marginRightMm: { usual: [8, 45], caution: 4 },
+  marginTopMm: { usual: [8, 45], caution: 4 },
+  marginBottomMm: { usual: [8, 45], caution: 4 },
+  slantDegrees: { usual: [-15, 15], caution: 6 },
+  lineSlope: { usual: [-2.5, 2.5], caution: 1.5 },
+  inkSkips: { usual: [0, 0.5], caution: 0.2 },
+  highlighterSmear: { usual: [0, 0.8], caution: 0.25 },
+  handSmudges: { usual: [0, 0.5], caution: 0.2 },
+  naturalnessAmount: { usual: [0.4, 1.5], caution: 0.3 },
+  paperSpacing: { usual: [6, 10], caution: 0.8 },
+};
+/** Any other imperfection: up to "Con prisa" and a bit more is normal. */
+const NATURAL_USUAL: UsualRange = { usual: [0, 1], caution: 0.25 };
+
 const NATURAL_KEYS: (keyof Naturalness)[] = [
   "sizeVariation",
   "rotation",
@@ -115,6 +145,7 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "inkTexture",
   "inkSkips",
   "highlighterSmear",
+  "handSmudges",
 ];
 
 /** What the document controller needs from the sheet. */
@@ -193,9 +224,12 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   });
   let paper = cleanPaper(loadPreference<Partial<PaperSettings>>("sheet.paper", {}));
   let titleUnderline = loadPreference("sheet.titleUnderline", true);
+  let leftHanded = loadPreference("sheet.leftHanded", false);
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
   let highlightColor = loadPreference("sheet.highlightColor", 0);
+  /** Highlight word by word (the hand lifted at every space), remembered for the next time. */
+  let highlightWords = loadPreference("sheet.highlightWords", false);
   /** The last scribble chosen: the next one looks the same. */
   let lastScribble: ScribbleStyle = { ...DEFAULT_SCRIBBLE, ...loadPreference<Partial<ScribbleStyle>>("sheet.scribbleLast", {}) };
 
@@ -371,6 +405,49 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     });
   }
 
+  /** Highlights the selection (or what is typed next) with the chosen colour and way of highlighting. */
+  function highlightOut(change: { color?: number; perWord?: boolean }): void {
+    if (change.color !== undefined) {
+      highlightColor = change.color;
+      savePreference("sheet.highlightColor", highlightColor);
+    }
+    if (change.perWord !== undefined) {
+      highlightWords = change.perWord;
+      savePreference("sheet.highlightWords", highlightWords);
+    }
+    // A new colour repaints everything; otherwise letters already highlighted keep theirs.
+    const paint = (m: number) => (change.color !== undefined || !(m & HIGHLIGHT) ? withHighlightColor(m | HIGHLIGHT, highlightColor) : m);
+    const fields: RunStyle = { highlightWords };
+    const { start, end } = editor.selection();
+    if (start === end) {
+      const result = applyRunStyle([paint(marksAt(start))], runStyles, 0, 1, fields);
+      runStyles = result.styles;
+      pendingMarks = result.marks[0];
+      updateToolbar();
+      return;
+    }
+    changeFormatting(() => {
+      const painted = marks.map((m, i) => (i >= start && i < end ? paint(m) : m));
+      const result = applyRunStyle(painted, runStyles, start, end, fields);
+      marks = result.marks;
+      runStyles = result.styles;
+    });
+  }
+
+  /** Paragraphs the selection covers from start to end (only those lose their style when formatting is cleared). */
+  function wholeParagraphs(start: number, end: number): number[] {
+    const result: number[] = [];
+    let paragraphStart = 0;
+    for (let p = 0, i = 0; i <= lastText.length; i++) {
+      if (i === lastText.length || lastText[i] === "\n") {
+        if (start <= paragraphStart && end >= i && i > paragraphStart) result.push(p);
+        p++;
+        paragraphStart = i + 1;
+      }
+    }
+    return result;
+  }
+
   function toggleFlag(flag: number, color = highlightColor, forceOn?: boolean): void {
     const { start, end } = editor.selection();
     if (start === end) {
@@ -399,11 +476,26 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     if (command === "undo") undo();
     else if (command === "redo") redo();
     else if (kind === "format" && value === "clear") {
+      // Like "Borrar formato" in Docs: plain text, and whole paragraphs back to normal.
       const { start, end } = editor.selection();
       if (start === end) pendingMarks = 0;
-      else changeFormatting(() => (marks = clearFlags(marks, start, end).map((m, i) => (i >= start && i < end ? withRunStyle(m, 0) : m))));
+      else
+        changeFormatting(() => {
+          marks = clearFlags(marks, start, end).map((m, i) => (i >= start && i < end ? withRunStyle(m, 0) : m));
+          const whole = wholeParagraphs(start, end);
+          if (whole.length > 0) {
+            paragraphs = paragraphs.slice();
+            for (const p of whole) paragraphs[p] = NORMAL_PARAGRAPH;
+          }
+        });
       updateToolbar();
-    } else if (command === "format:scribble") {
+    } else if (command === "format:highlight") {
+      const { start, end } = editor.selection();
+      const on = start === end ? !(marksAt(start) & HIGHLIGHT) : !rangeHasMark(lastText, marks, start, end, HIGHLIGHT);
+      if (on) highlightOut({});
+      else toggleFlag(HIGHLIGHT, highlightColor, false);
+    } else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
+    else if (command === "format:scribble") {
       const { start, end } = editor.selection();
       const on = start === end ? !(marksAt(start) & SCRIBBLE) : !rangeHasMark(lastText, marks, start, end, SCRIBBLE);
       if (on) scribbleOut({});
@@ -417,11 +509,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     else if (kind === "format" && FLAGS[value]) toggleFlag(FLAGS[value]);
     else if (kind === "highlight") {
       if (value === "none") toggleFlag(HIGHLIGHT, highlightColor, false);
-      else {
-        highlightColor = Number(value) || 0;
-        savePreference("sheet.highlightColor", highlightColor);
-        toggleFlag(HIGHLIGHT, highlightColor, true);
-      }
+      else highlightOut({ color: Math.max(0, Math.min(HIGHLIGHT_COLORS.length - 1, Number(value) || 0)) });
     } else if (kind === "pen") changeRunStyle({ penId: value === "default" ? undefined : penById(value).id });
     else if (kind === "ink" && /^#[0-9a-f]{6}$/i.test(value)) changeRunStyle({ color: value });
     else if (kind === "size") changeRunStyle({ size: Number(value) || 1 });
@@ -511,6 +599,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       inkDisabled: penById(selected.penId ?? penId).kind === "pencil",
       size: selected.size ?? 1,
       scribbleStyle: has(SCRIBBLE) ? scribbleStyleOf(selected) : lastScribble,
+      highlightWords: has(HIGHLIGHT) ? Boolean(selected.highlightWords) : highlightWords,
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
@@ -533,6 +622,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       step: 0.01,
       value: penTuning[key],
       defaultValue: 1,
+      ...USUAL[key],
       format: percent,
       onInput: (value) => {
         penTuning = { ...penTuning, [key]: value };
@@ -553,6 +643,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       step,
       value: page[key],
       defaultValue: A4[key],
+      ...USUAL[key],
       format,
       onInput: (value) => {
         page = { ...page, [key]: value };
@@ -580,6 +671,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       ...range,
       value: naturalness[key],
       defaultValue: presetById(DEFAULT_PRESET_ID).values[key],
+      ...(USUAL[key] ?? NATURAL_USUAL),
       onInput: (value) => {
         naturalness = { ...naturalness, [key]: value };
         presetId = "custom";
@@ -640,6 +732,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     step: 0.5,
     value: paper.lineSpacingMm,
     defaultValue: DEFAULT_PAPER.lineSpacingMm,
+    ...USUAL.paperSpacing,
     format: mmFormat,
     onInput: (value) => setPaper({ lineSpacingMm: value }),
   });
@@ -649,6 +742,13 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   paperSelect.addEventListener("change", () => setPaper({ kind: paperSelect.value as PaperKind }));
   marginLine.addEventListener("change", () => setPaper({ marginLine: marginLine.checked }));
   printPaper.addEventListener("change", () => setPaper({ print: printPaper.checked }));
+  const leftHand = h("input", { type: "checkbox", checked: leftHanded });
+  leftHand.addEventListener("change", () => {
+    leftHanded = leftHand.checked;
+    savePreference("sheet.leftHanded", leftHanded);
+    changed();
+    scheduleRender();
+  });
   titleLine.addEventListener("change", () => {
     titleUnderline = titleLine.checked;
     savePreference("sheet.titleUnderline", titleUnderline);
@@ -685,6 +785,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     step: 0.01,
     value: naturalnessAmount,
     defaultValue: 1,
+    ...USUAL.naturalnessAmount,
     format: percent,
     onInput: (value) => {
       naturalnessAmount = value;
@@ -744,6 +845,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     naturalnessAmount = 1;
     amountSlider.set(1);
     savePreference("sheet.naturalnessAmount", 1);
+    leftHanded = false;
+    leftHand.checked = false;
+    savePreference("sheet.leftHanded", false);
     persist();
     relayout();
     scheduleRender();
@@ -827,6 +931,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       resetNaturalness,
       field(es.sheet.preset, presetSelect, h("div", { class: "button-row" }, randomButton), h("p", { class: "muted" }, es.sheet.randomHelp)),
       amountSlider.root,
+      check(leftHand, es.sheet.leftHanded, es.sheet.leftHandedHelp),
       advanced,
       h("div", { "data-search": searchKey(`${es.sheet.rewrite} ${es.sheet.rewriteHelp}`) }, h("div", { class: "inline spaced" }, rewriteButton, versionLabel), h("p", { class: "muted" }, es.sheet.rewriteHelp)),
     ),
@@ -887,6 +992,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       currentColor(),
       JSON.stringify(naturalness),
       naturalnessAmount,
+      String(leftHanded),
       JSON.stringify(runStyles),
       seed,
       JSON.stringify(page),
@@ -930,6 +1036,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         seed,
         pageIndex,
         runStyles,
+        leftHanded,
         background: "white",
         widthScale: penTuning.widthScale,
         inkStrength: penTuning.inkStrength,
@@ -977,6 +1084,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
           seed,
           pageIndex,
           runStyles,
+          leftHanded,
           background: forPdf ? "white" : "transparent",
           widthScale: penTuning.widthScale,
           inkStrength: penTuning.inkStrength,
@@ -1039,7 +1147,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   showPaper();
 
-  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount });
+  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount, leftHanded });
 
   const documentApi: SheetDocumentApi = {
     getDocument: () => ({ text: lastText, charIds, marks, paragraphs, runStyles, settings: currentSettings() }),
@@ -1055,6 +1163,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         seed = doc.settings.seed;
         paper = cleanPaper(doc.settings.paper);
         titleUnderline = doc.settings.titleUnderline;
+        leftHanded = doc.settings.leftHanded;
+        leftHand.checked = leftHanded;
+        savePreference("sheet.leftHanded", leftHanded);
         naturalnessAmount = doc.settings.naturalnessAmount;
         amountSlider.set(naturalnessAmount);
         savePreference("sheet.naturalnessAmount", naturalnessAmount);

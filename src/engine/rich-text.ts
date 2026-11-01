@@ -52,6 +52,8 @@ export interface RunStyle {
   scribbleRage?: number;
   scribbleWidth?: number;
   scribbleWords?: boolean;
+  /** Highlighter lifted at every space instead of one sweep along the line. */
+  highlightWords?: boolean;
 }
 
 export function scribbleStyleOf(style: RunStyle | undefined): ScribbleStyle {
@@ -86,7 +88,8 @@ export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
     sa.kind === sb.kind &&
     sa.rage === sb.rage &&
     sa.width === sb.width &&
-    sa.perWord === sb.perWord
+    sa.perWord === sb.perWord &&
+    Boolean(a.highlightWords) === Boolean(b.highlightWords)
   );
 }
 
@@ -100,6 +103,7 @@ export function cleanRunStyle(style: RunStyle): RunStyle {
   if (style.scribbleRage !== undefined && Math.abs(style.scribbleRage - DEFAULT_SCRIBBLE.rage) > 1e-6) clean.scribbleRage = style.scribbleRage;
   if (style.scribbleWidth !== undefined && Math.abs(style.scribbleWidth - DEFAULT_SCRIBBLE.width) > 1e-6) clean.scribbleWidth = style.scribbleWidth;
   if (style.scribbleWords) clean.scribbleWords = true;
+  if (style.highlightWords) clean.highlightWords = true;
   return clean;
 }
 
