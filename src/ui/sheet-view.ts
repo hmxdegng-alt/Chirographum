@@ -124,7 +124,8 @@ const USUAL: Record<string, UsualRange> = {
   lineSlope: { usual: [-2.5, 2.5], caution: 1.5 },
   inkSkips: { usual: [0, 0.5], caution: 0.2 },
   highlighterSmear: { usual: [0, 0.8], caution: 0.25 },
-  handSmudges: { usual: [0, 0.5], caution: 0.2 },
+  handSmudges: { usual: [0, 0.6], caution: 0.25 },
+  fingerprints: { usual: [0, 0.6], caution: 0.3 },
   naturalnessAmount: { usual: [0.4, 1.5], caution: 0.3 },
   paperSpacing: { usual: [6, 10], caution: 0.8 },
 };
@@ -146,6 +147,7 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "inkSkips",
   "highlighterSmear",
   "handSmudges",
+  "fingerprints",
 ];
 
 /** What the document controller needs from the sheet. */
@@ -230,6 +232,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   let highlightColor = loadPreference("sheet.highlightColor", 0);
   /** Highlight word by word (the hand lifted at every space), remembered for the next time. */
   let highlightWords = loadPreference("sheet.highlightWords", false);
+  /** Round ends (a worn or bullet tip) instead of the chisel's square ones. */
+  let highlightRound = loadPreference("sheet.highlightRound", false);
   /** The last scribble chosen: the next one looks the same. */
   let lastScribble: ScribbleStyle = { ...DEFAULT_SCRIBBLE, ...loadPreference<Partial<ScribbleStyle>>("sheet.scribbleLast", {}) };
 
@@ -406,7 +410,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   }
 
   /** Highlights the selection (or what is typed next) with the chosen colour and way of highlighting. */
-  function highlightOut(change: { color?: number; perWord?: boolean }): void {
+  function highlightOut(change: { color?: number; perWord?: boolean; round?: boolean }): void {
     if (change.color !== undefined) {
       highlightColor = change.color;
       savePreference("sheet.highlightColor", highlightColor);
@@ -415,9 +419,13 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       highlightWords = change.perWord;
       savePreference("sheet.highlightWords", highlightWords);
     }
+    if (change.round !== undefined) {
+      highlightRound = change.round;
+      savePreference("sheet.highlightRound", highlightRound);
+    }
     // A new colour repaints everything; otherwise letters already highlighted keep theirs.
     const paint = (m: number) => (change.color !== undefined || !(m & HIGHLIGHT) ? withHighlightColor(m | HIGHLIGHT, highlightColor) : m);
-    const fields: RunStyle = { highlightWords };
+    const fields: RunStyle = { highlightWords, highlightRound };
     const { start, end } = editor.selection();
     if (start === end) {
       const result = applyRunStyle([paint(marksAt(start))], runStyles, 0, 1, fields);
@@ -495,6 +503,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       if (on) highlightOut({});
       else toggleFlag(HIGHLIGHT, highlightColor, false);
     } else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
+    else if (kind === "highlight-ends") highlightOut({ round: value === "round" });
     else if (command === "format:scribble") {
       const { start, end } = editor.selection();
       const on = start === end ? !(marksAt(start) & SCRIBBLE) : !rangeHasMark(lastText, marks, start, end, SCRIBBLE);
@@ -600,6 +609,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       size: selected.size ?? 1,
       scribbleStyle: has(SCRIBBLE) ? scribbleStyleOf(selected) : lastScribble,
       highlightWords: has(HIGHLIGHT) ? Boolean(selected.highlightWords) : highlightWords,
+      highlightRound: has(HIGHLIGHT) ? Boolean(selected.highlightRound) : highlightRound,
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }

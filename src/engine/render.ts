@@ -152,12 +152,129 @@ function parseHex(color: string): [number, number, number] {
   return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) || 0) as [number, number, number];
 }
 
+/** Smooth 2D value noise in [-1, 1], cells of `cell` units. */
+function noise2D(rng: Rng, cell: number): (x: number, y: number) => number {
+  const values = new Map<number, number>();
+  const at = (i: number, j: number) => {
+    const key = i * 7919 + j;
+    let v = values.get(key);
+    if (v === undefined) {
+      v = rng.next() * 2 - 1;
+      values.set(key, v);
+    }
+    return v;
+  };
+  const smooth = (f: number) => f * f * (3 - 2 * f);
+  return (x: number, y: number) => {
+    const u = x / cell;
+    const v = y / cell;
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const fx = smooth(u - i);
+    const fy = smooth(v - j);
+    const top = at(i, j) * (1 - fx) + at(i + 1, j) * fx;
+    const bottom = at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx;
+    return top * (1 - fy) + bottom * fy;
+  };
+}
+
+/**
+ * A fingertip print in ink or graphite: ridges about half a millimetre apart
+ * turning round a core, fading at the edge and missing where the finger
+ * pressed less. Drawn upright; the caller rotates it.
+ */
+function fingerprint(seed: number, pxPerMm: number, color: [number, number, number], strength: number): HTMLCanvasElement {
+  const rng = createRng(seed);
+  const halfW = 6 + 2 * rng.next();
+  const halfH = halfW * (1.2 + 0.15 * rng.next());
+  const period = 0.36 + 0.08 * rng.next();
+  const core = { x: (rng.next() - 0.5) * 0.3 * halfW, y: -(0.1 + 0.25 * rng.next()) * halfH };
+  const warp = noise2D(rng, 3.2);
+  const pressure = noise2D(rng, 2.6);
+  const size = Math.ceil(2 * halfH * pxPerMm) + 2;
+  const canvas = createCanvas(size, size);
+  const ctx = canvas.getContext("2d")!;
+  const image = ctx.createImageData(size, size);
+  const data = image.data;
+  const lean = (rng.next() - 0.5) * 0.25;
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const x = (px - size / 2) / pxPerMm;
+      const y = (py - size / 2) / pxPerMm;
+      const e = (x / halfW) ** 2 + (y / halfH) ** 2;
+      if (e >= 1) continue;
+      const dx = x - core.x;
+      const dy = y - core.y;
+      // Round the core; lower down the ridges flatten into arches across the finger.
+      const r = Math.hypot(dx, dy * 0.82);
+      const arch = y + lean * x + 0.06 * x * x;
+      const below = Math.min(1, Math.max(0, (dy + 0.2 * halfH) / (0.4 * halfH)));
+      const t = Math.min(1, Math.max(0, (r - 0.35 * halfW) / (0.3 * halfW))) * (0.35 + 0.65 * below * below * (3 - 2 * below));
+      const phase = (r * (1 - t) + arch * t) / period + 0.25 * warp(x, y);
+      const ridge = (0.5 + 0.5 * Math.cos(2 * Math.PI * phase)) ** 1.5;
+      const edge = 1 - Math.min(1, Math.max(0, (e - 0.55) / 0.45));
+      const press = Math.min(1, Math.max(0, 0.35 + 0.9 * pressure(x, y)));
+      const alpha = ridge * edge * press * strength;
+      if (alpha <= 0.004) continue;
+      const k = (py * size + px) * 4;
+      data[k] = color[0];
+      data[k + 1] = color[1];
+      data[k + 2] = color[2];
+      data[k + 3] = Math.round(Math.min(1, alpha) * 255);
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas;
+}
+
 interface StrokeGeometry {
   samples: Sample[];
   widths: number[];
   tones: number[];
   startBlob: number;
   endBlob: number;
+  /**
+   * A chisel tip (highlighters): the direction of its edge, a unit vector.
+   * The stroke is then a band with straight, slanted ends instead of round ones.
+   */
+  chisel?: { x: number; y: number };
+}
+
+/** Part of a stroke, between two distances along it. */
+function sliceGeometry(g: StrokeGeometry, from: number, to: number): StrokeGeometry | null {
+  const keep = g.samples.map((s, i) => (s.s >= from && s.s <= to ? i : -1)).filter((i) => i >= 0);
+  if (keep.length < 2) return null;
+  return {
+    samples: keep.map((i) => g.samples[i]),
+    widths: keep.map((i) => g.widths[i]),
+    tones: keep.map((i) => g.tones[i]),
+    startBlob: 0,
+    endBlob: 0,
+    chisel: g.chisel,
+  };
+}
+
+/** A chisel-tip stroke: one band with straight ends, a little darker along its edges where the ink dries. */
+function drawChisel(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
+  const { samples, widths, tones } = g;
+  const edge = g.chisel!;
+  const side = (sign: number) => samples.map((s, i) => ({ x: s.x - dx + sign * edge.x * (widths[i] / 2), y: s.y - dy + sign * edge.y * (widths[i] / 2) }));
+  const top = side(1);
+  const bottom = side(-1);
+  const tone = tones.reduce((sum, t) => sum + t, 0) / tones.length;
+  ctx.fillStyle = toneStyle(tone * 0.9);
+  ctx.beginPath();
+  top.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  for (let i = bottom.length - 1; i >= 0; i--) ctx.lineTo(bottom[i].x, bottom[i].y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = toneStyle(tone);
+  ctx.lineWidth = Math.max(0.6, widths[0] * 0.06);
+  for (const line of [top, bottom]) {
+    ctx.beginPath();
+    line.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+    ctx.stroke();
+  }
 }
 
 /** Turns one drawn stroke into page samples with width and tone at each one. */
@@ -209,6 +326,10 @@ function strokeGeometry(
 
 /** Draws a stroke as tone (grey levels) with "lighten", so it never darkens itself. */
 function drawTone(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
+  if (g.chisel && g.samples.length > 1) {
+    drawChisel(ctx, g, dx, dy);
+    return;
+  }
   const { samples, widths, tones } = g;
   if (samples.length === 1) {
     ctx.fillStyle = toneStyle(tones[0]);
@@ -385,6 +506,14 @@ function toneToInk(ctx: CanvasRenderingContext2D, box: InkBox, style: InkStyle, 
   }
 }
 
+/** The smallest box holding both (either may be missing). */
+function unionBox(a: InkBox | null, b: InkBox | null, width: number, height: number): InkBox | null {
+  if (!a || !b) return a ?? b;
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return clampBox({ x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y }, width, height);
+}
+
 function clampBox(box: InkBox, width: number, height: number): InkBox | null {
   const x = Math.max(0, Math.floor(box.x));
   const y = Math.max(0, Math.floor(box.y));
@@ -482,7 +611,7 @@ const HIGHLIGHTER: PenModel = {
 function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: number; seed: number }): { x: number; y: number; p: number }[] {
   const rng = createRng(span?.seed ?? d.seed);
   const xh = d.xhMm;
-  const offset = d.kind === "underline" ? 0.32 * xh : d.kind === "strike" ? -0.48 * xh : -0.42 * xh;
+  const offset = d.kind === "underline" ? 0.32 * xh : d.kind === "strike" ? -0.48 * xh : -0.5 * xh;
   const startX = span?.from ?? d.x0 - (d.kind === "highlight" ? 0.3 : 0.1 + rng.next() * 0.4) * xh;
   const endX = span?.to ?? d.x1 + (d.kind === "highlight" ? 0.3 : rng.next() * 0.5) * xh;
   const length = Math.max(0.5, endX - startX);
@@ -506,7 +635,7 @@ function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: num
 const DEG = Math.PI / 180;
 
 /** Width of the highlighter's band, in x-heights. */
-const HIGHLIGHT_TIP = 1.35;
+const HIGHLIGHT_TIP = 1.65;
 
 /** How far one sweep of the highlighter goes before the hand is lifted, in millimetres. */
 const SWEEP_MM = [30, 70];
@@ -516,14 +645,24 @@ const SWEEP_MM = [30, 70];
  * hand is lifted and put back a little behind where it stopped, so the
  * restart overlaps (and shows darker) and sits at a slightly different height.
  */
-function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean): { x: number; y: number; p: number }[][] {
+function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean, round: boolean): { x: number; y: number; p: number }[][] {
   const rng = createRng(deriveSeed(d.seed, "sweeps"));
   const xh = d.xhMm;
-  // Word by word, the tip stops close to each word so the spaces stay clean
-  // (the round end of the stroke already reaches half the tip's width further).
-  const cap = (HIGHLIGHT_TIP / 2) * xh;
-  let start = wordByWord ? d.x0 + cap - (0.05 + 0.1 * rng.next()) * xh : d.x0 - 0.3 * xh;
-  let end = wordByWord ? d.x1 - cap + (0.05 + 0.1 * rng.next()) * xh : d.x1 + 0.3 * xh;
+  // Word by word, the tip stops close to each word so the spaces stay clean.
+  // A round end reaches half the tip's width further than where it stops.
+  const cap = round ? (HIGHLIGHT_TIP / 2) * xh : 0;
+  let start: number;
+  let end: number;
+  if (wordByWord) {
+    start = d.x0 + cap - (0.05 + 0.1 * rng.next()) * xh;
+    end = d.x1 - cap + (0.05 + 0.1 * rng.next()) * xh;
+  } else if (round) {
+    start = d.x0 - 0.3 * xh;
+    end = d.x1 + 0.3 * xh;
+  } else {
+    start = d.x0 - (0.5 + 0.4 * rng.next()) * xh;
+    end = d.x1 + (0.5 + 0.5 * rng.next()) * xh;
+  }
   if (end - start < 0.1 * xh) start = end = (start + end) / 2;
   const sweeps: { x: number; y: number; p: number }[][] = [];
   let from = start;
@@ -720,9 +859,29 @@ export function renderPage(
       const tip = { ...HIGHLIGHTER, widthMm: HIGHLIGHT_TIP * d.xhMm };
       // How much ink it drags depends on the instrument underneath.
       const smear = (nat.highlighterSmear ?? 0) * groupFor(d.style ?? 0).pen.smear;
-      highlighterSweeps(d, pxPerMm, Boolean(d.style > 0 && runStyles[d.style - 1]?.highlightWords)).forEach((sweep, n) =>
-        highlights.push({ geometry: strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color, smear, seed: deriveSeed(d.seed, "smear", n) }),
-      );
+      const look = d.style > 0 ? runStyles[d.style - 1] : undefined;
+      const round = Boolean(look?.highlightRound);
+      highlighterSweeps(d, pxPerMm, Boolean(look?.highlightWords), round).forEach((sweep, n) => {
+        const geometry = strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1);
+        const sweepRng = createRng(deriveSeed(d.seed, "chisel", n));
+        if (!round) {
+          // The chisel is held at a slant: the ends are straight and lean a little.
+          const lean = (10 + 14 * sweepRng.next()) * DEG;
+          geometry.chisel = { x: Math.sin(lean), y: -Math.cos(lean) };
+        }
+        highlights.push({ geometry, color: d.color, smear, seed: deriveSeed(d.seed, "smear", n) });
+        // Where the tip rests a moment, more ink soaks in: a darker patch, more often at the end.
+        const length = geometry.samples[geometry.samples.length - 1]?.s ?? 0;
+        const pool = (0.4 + 0.9 * sweepRng.next()) * pxPerMm;
+        if (length > 3 * pool && sweepRng.next() < 0.6) {
+          const end = sliceGeometry(geometry, length - pool, length);
+          if (end) highlights.push({ geometry: end, color: d.color, smear: 0, seed: 0 });
+        }
+        if (length > 3 * pool && sweepRng.next() < 0.2) {
+          const start = sliceGeometry(geometry, 0, pool * 0.7);
+          if (start) highlights.push({ geometry: start, color: d.color, smear: 0, seed: 0 });
+        }
+      });
     } else {
       const group = groupFor(d.style ?? 0);
       include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale));
@@ -842,7 +1001,12 @@ export function renderPage(
   // 1c. Smudges: now and then the writing hand rubs fresh ink or graphite. A
   // left hand runs over what it has just written and drags it to the right;
   // a right hand only catches the line above, down and to the right.
-  const smudging = (nat.handSmudges ?? 0) * (options.leftHanded ? 3 : 1);
+  // The slider's 100 % is a clearly visible amount; past it, bigger and darker.
+  const smudgeAmount = (nat.handSmudges ?? 0) * 3;
+  const smudging = smudgeAmount * (options.leftHanded ? 3 : 1);
+  const smudgeExtra = Math.max(0, smudgeAmount - 3);
+  /** What smudges and prints add outside the ink, so the printed page keeps it. */
+  let marksBox: InkBox | null = null;
   if (box && smudging > 0.005) {
     const STEPS = 6;
     const left = Boolean(options.leftHanded);
@@ -850,19 +1014,21 @@ export function renderPage(
       if (glyph.page !== options.pageIndex) continue;
       const pen = groupFor(glyph.style ?? 0).pen;
       const rng = createRng(deriveSeed(glyph.seed, "smudge"));
-      if (rng.next() > Math.min(0.5, smudging * pen.smudge * (left ? 0.027 : 0.025))) continue;
+      if (rng.next() > Math.min(0.6, smudging * pen.smudge * (left ? 0.027 : 0.025))) continue;
+      const grow = 1 + 0.15 * smudgeExtra;
       const xh = page.xHeightMm * glyph.scale;
       const cx = (glyph.xMm + glyph.widthMm * (0.2 + 0.6 * rng.next())) * pxPerMm;
       const cy = (glyph.yMm - xh * (left ? 0.2 + 0.4 * rng.next() : 0.5 + 0.5 * rng.next())) * pxPerMm;
-      const rx = xh * (left ? 0.8 + 1.0 * rng.next() : 0.7 + 0.8 * rng.next()) * pxPerMm;
+      const rx = xh * (left ? 0.8 + 1.0 * rng.next() : 0.7 + 0.8 * rng.next()) * pxPerMm * grow;
       const ry = xh * (0.45 + 0.35 * rng.next()) * pxPerMm;
       const angle = left ? (rng.next() - 0.5) * 0.3 : Math.PI * (0.25 + 0.2 * rng.next());
-      const reach = xh * (left ? 0.6 + 1.0 * rng.next() : 0.4 + 0.7 * rng.next()) * pxPerMm;
-      const strength = (0.18 + 0.25 * rng.next()) * Math.min(1, pen.smudge);
+      const reach = xh * (left ? 0.6 + 1.0 * rng.next() : 0.4 + 0.7 * rng.next()) * pxPerMm * grow;
+      const strength = Math.min(0.95, (0.3 + 0.3 * rng.next()) * Math.min(1, pen.smudge) * (1 + 0.12 * smudgeExtra));
       const dx = Math.cos(angle) * reach;
       const dy = Math.sin(angle) * reach;
       const sb = clampBox({ x: cx - rx - reach, y: cy - rx - reach, width: 2 * (rx + reach), height: 2 * (rx + reach) }, canvas.width, canvas.height);
       if (!sb) continue;
+      marksBox = unionBox(marksBox, sb, canvas.width, canvas.height);
       const patch = createCanvas(sb.width, sb.height);
       const pctx = patch.getContext("2d")!;
       pctx.filter = `blur(${Math.max(0.4, 0.15 * pxPerMm).toFixed(2)}px)`;
@@ -907,8 +1073,50 @@ export function renderPage(
     }
   }
 
+  // 1d. Fingerprints: an inky or graphite fingertip where the paper was held,
+  // mostly near the corners and the edges.
+  const printsWanted = (nat.fingerprints ?? 0) * 1.5;
+  if (box && printsWanted > 0.005) {
+    const rng = createRng(deriveSeed(options.seed, "fingerprints", options.pageIndex));
+    const count = Math.min(6, Math.floor(printsWanted) + (rng.next() < printsWanted % 1 ? 1 : 0));
+    // The finger carries whatever wrote most of the page.
+    const main = [...groups.values()].reduce((a, b) => (b.strokes.length > a.strokes.length ? b : a));
+    const graphite = main.pen.kind === "pencil";
+    const color = parseHex(main.color);
+    const bold = Math.min(2, 1 + 0.3 * Math.max(0, (nat.fingerprints ?? 0) - 1));
+    const placed: { x: number; y: number }[] = [];
+    for (let n = 0; n < count; n++) {
+      const w = page.widthMm;
+      const hgt = page.heightMm;
+      // Where fingers hold a sheet: the lower corners, the sides, now and then the top or the middle.
+      // Two prints rarely land on the same spot.
+      let x = 0;
+      let y = 0;
+      let side = false;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        side = rng.next() < 0.5;
+        const where = rng.next();
+        x = where < 0.75 ? (side ? 4 + 14 * rng.next() : w - 4 - 14 * rng.next()) : 25 + (w - 50) * rng.next();
+        y = where < 0.45 ? hgt - 8 - 22 * rng.next() : where < 0.75 ? 30 + (hgt - 60) * rng.next() : where < 0.88 ? 8 + 20 * rng.next() : 30 + (hgt - 60) * rng.next();
+        if (placed.every((p) => Math.hypot(p.x - x, p.y - y) > 22)) break;
+      }
+      placed.push({ x, y });
+      const strength = (graphite ? 0.2 + 0.12 * rng.next() : 0.1 + 0.1 * rng.next()) * bold;
+      const print = fingerprint(deriveSeed(options.seed, "print", options.pageIndex, n), pxPerMm, color, strength);
+      const reach = Math.hypot(print.width, print.height) / 2;
+      marksBox = unionBox(marksBox, clampBox({ x: x * pxPerMm - reach, y: y * pxPerMm - reach, width: 2 * reach, height: 2 * reach }, canvas.width, canvas.height), canvas.width, canvas.height);
+      ctx.save();
+      ctx.globalCompositeOperation = "destination-over";
+      ctx.translate(x * pxPerMm, y * pxPerMm);
+      ctx.rotate((rng.next() - 0.5) * 1.6 + (side ? 0.3 : -0.3));
+      ctx.drawImage(print, -print.width / 2, -print.height / 2);
+      ctx.restore();
+      print.width = 0;
+    }
+  }
+
   // 2. Highlighter behind the ink (dark ink shows through it, as on paper).
-  let fullBox = box;
+  let fullBox = unionBox(box, marksBox, canvas.width, canvas.height);
   if (highlights.length > 0) {
     const layer = createCanvas(canvas.width, canvas.height);
     const lctx = layer.getContext("2d")!;
@@ -918,20 +1126,7 @@ export function renderPage(
       const highlightStyle: InkStyle = { ...style, color: HIGHLIGHT_COLORS[color]?.value ?? HIGHLIGHT_COLORS[0].value, opacity: HIGHLIGHTER.opacity };
       renderMarkerStrokes(lctx, geometries, { ...options, pen: HIGHLIGHTER }, highlightStyle, HIGHLIGHTER.softnessMm * pxPerMm);
       const hb = strokesBox(geometries, 3, canvas.width, canvas.height);
-      if (hb) {
-        fullBox = fullBox
-          ? clampBox(
-              {
-                x: Math.min(fullBox.x, hb.x),
-                y: Math.min(fullBox.y, hb.y),
-                width: Math.max(fullBox.x + fullBox.width, hb.x + hb.width) - Math.min(fullBox.x, hb.x),
-                height: Math.max(fullBox.y + fullBox.height, hb.y + hb.height) - Math.min(fullBox.y, hb.y),
-              },
-              canvas.width,
-              canvas.height,
-            )
-          : hb;
-      }
+      fullBox = unionBox(fullBox, hb, canvas.width, canvas.height);
     }
     ctx.save();
     ctx.globalCompositeOperation = "destination-over";

@@ -42,7 +42,13 @@ export interface SliderOptions {
   step: number;
   value: number;
   format: (value: number) => string;
+  /**
+   * The new value, once the slider is let go (or moved with the keyboard):
+   * redrawing the page while dragging would make the slider stutter.
+   */
   onInput: (value: number) => void;
+  /** Cheap updates while dragging (a small preview), if any. */
+  live?: (value: number) => void;
   /** Value to go back to with the reset button (shown only when different). */
   defaultValue?: number;
   /** Extra words the settings search should find it by. */
@@ -132,8 +138,9 @@ export function slider(options: SliderOptions): { root: HTMLElement; set: (value
   input.addEventListener("input", () => {
     const value = Number(input.value);
     show(value);
-    options.onInput(value);
+    options.live?.(value);
   });
+  input.addEventListener("change", () => options.onInput(Number(input.value)));
   root.append(h("span", { class: "slider-head" }, h("span", {}, options.label), h("span", { class: "slider-right" }, reset, output)), input);
   show(options.value);
   return {

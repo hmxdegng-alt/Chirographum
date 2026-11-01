@@ -54,6 +54,8 @@ export interface RunStyle {
   scribbleWords?: boolean;
   /** Highlighter lifted at every space instead of one sweep along the line. */
   highlightWords?: boolean;
+  /** Round highlighter ends (a worn or bullet tip) instead of the chisel's square ones. */
+  highlightRound?: boolean;
 }
 
 export function scribbleStyleOf(style: RunStyle | undefined): ScribbleStyle {
@@ -89,7 +91,8 @@ export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
     sa.rage === sb.rage &&
     sa.width === sb.width &&
     sa.perWord === sb.perWord &&
-    Boolean(a.highlightWords) === Boolean(b.highlightWords)
+    Boolean(a.highlightWords) === Boolean(b.highlightWords) &&
+    Boolean(a.highlightRound) === Boolean(b.highlightRound)
   );
 }
 
@@ -104,6 +107,7 @@ export function cleanRunStyle(style: RunStyle): RunStyle {
   if (style.scribbleWidth !== undefined && Math.abs(style.scribbleWidth - DEFAULT_SCRIBBLE.width) > 1e-6) clean.scribbleWidth = style.scribbleWidth;
   if (style.scribbleWords) clean.scribbleWords = true;
   if (style.highlightWords) clean.highlightWords = true;
+  if (style.highlightRound) clean.highlightRound = true;
   return clean;
 }
 

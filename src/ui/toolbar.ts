@@ -44,32 +44,50 @@ export interface ToolbarState {
   scribbleStyle: ScribbleStyle;
   /** The selection is (or will be) highlighted word by word. */
   highlightWords: boolean;
+  /** …with round ends instead of square ones. */
+  highlightRound: boolean;
 }
 
 /** Sizes offered for a selection, relative to the paragraph. */
 const SIZES = [0.6, 0.8, 1, 1.25, 1.5, 2, 2.5, 3];
 const MAX_RECENT_INKS = 6;
-/** Wait for the slider to settle before redrawing the page. */
-const SLIDER_SETTLE_MS = 160;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** A small drawing of a kind of scribble over a word, made by the same code that draws the page. */
-function scribblePreview(kind: ScribbleKind, rage: number): SVGSVGElement {
+function scribblePreview(kind: ScribbleKind, rage: number, withWord = true): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 18 11");
   svg.setAttribute("aria-hidden", "true");
   svg.classList.add("scribble-preview");
-  const word = document.createElementNS(SVG_NS, "path");
-  // A pretend word underneath, so the kinds can be told apart.
-  word.setAttribute("d", `M2.5 7.6 ${"q1 -2.6 2 0 ".repeat(6)}M5.6 6.4 v-3.4 M12.6 6.4 v-3.4`);
-  word.setAttribute("class", "scribble-preview-word");
-  svg.append(word);
+  if (withWord) {
+    const word = document.createElementNS(SVG_NS, "path");
+    // A pretend word underneath, so the kinds can be told apart.
+    word.setAttribute("d", `M2.5 7.6 ${"q1 -2.6 2 0 ".repeat(6)}M5.6 6.4 v-3.4 M12.6 6.4 v-3.4`);
+    word.setAttribute("class", "scribble-preview-word");
+    svg.append(word);
+  }
   for (const stroke of scribbleStrokes({ x0: 2.4, x1: 15.6, y0: 7.6, y1: 7.6, xhMm: 2.6, seed: 11 }, { kind, rage, width: 1, perWord: false })) {
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", stroke.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" "));
     svg.append(path);
   }
+  return svg;
+}
+
+/** A short highlighter band with square or round ends. */
+function endIcon(round: boolean): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 28 12");
+  svg.setAttribute("width", "28");
+  svg.setAttribute("height", "12");
+  svg.setAttribute("aria-hidden", "true");
+  const band = document.createElementNS(SVG_NS, "path");
+  band.setAttribute("d", round ? "M7 2h14a4 4 0 0 1 0 8H7a4 4 0 0 1 0-8z" : "M4.5 2h21l-2 8h-21z");
+  band.setAttribute("fill", "#f5e03a");
+  band.setAttribute("stroke", "#c9b220");
+  band.setAttribute("stroke-width", "0.8");
+  svg.append(band);
   return svg;
 }
 
@@ -168,7 +186,10 @@ export function createToolbar(
   const italic = tool(h("i", {}, "K"), es.toolbar.italic, "format:italic");
   const underline = tool(h("u", {}, "S"), es.toolbar.underline, "format:underline");
   const strike = tool(h("s", {}, "abc"), es.toolbar.strike, "format:strike");
-  const scribble = tool(h("span", { class: "scribble-label" }, "abc"), es.toolbar.scribble, "format:scribble");
+  // The button shows a real scribble: "Rayajos" with all the rage.
+  const scribbleIcon = scribblePreview("zigzag", 1, false);
+  scribbleIcon.classList.add("scribble-icon");
+  const scribble = tool(scribbleIcon, es.toolbar.scribble, "format:scribble");
 
   // Kind, thickness and rage of the scribble, like the highlighter's colours.
   const scribbleMenu = h("div", { class: "tool-menu scribble-menu", hidden: true, role: "menu" });
@@ -188,14 +209,6 @@ export function createToolbar(
   }
   const perWord = h("input", { type: "checkbox" });
   perWord.addEventListener("change", () => onCommand(`scribble-words:${perWord.checked ? 1 : 0}`));
-  const settle = (command: string) => {
-    let timer: number | undefined;
-    return (value: number) => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => onCommand(`${command}:${value}`), SLIDER_SETTLE_MS);
-    };
-  };
-  const sendRage = settle("scribble-rage");
   const widthSlider = slider({
     label: es.toolbar.scribbleWidth,
     min: 0.4,
@@ -206,7 +219,7 @@ export function createToolbar(
     usual: [0.6, 2],
     caution: 0.4,
     format: percent,
-    onInput: settle("scribble-width"),
+    onInput: (value) => onCommand(`scribble-width:${value}`),
   });
   const rageSlider = slider({
     label: es.toolbar.scribbleRage,
@@ -216,10 +229,8 @@ export function createToolbar(
     value: 0.5,
     defaultValue: 0.5,
     format: percent,
-    onInput: (value) => {
-      drawKinds(value);
-      sendRage(value);
-    },
+    live: drawKinds,
+    onInput: (value) => onCommand(`scribble-rage:${value}`),
   });
   const removeScribble = h("button", { type: "button", class: "menu-text", role: "menuitem" }, es.toolbar.removeScribble);
   removeScribble.addEventListener("mousedown", (event) => event.preventDefault());
@@ -322,7 +333,21 @@ export function createToolbar(
   });
   const highlightPerWord = h("input", { type: "checkbox" });
   highlightPerWord.addEventListener("change", () => onCommand(`highlight-words:${highlightPerWord.checked ? 1 : 0}`));
-  colorMenu.append(h("label", { class: "check menu-check" }, highlightPerWord, es.toolbar.highlightPerWord), removeHighlight);
+  // Square ends (a chisel tip, as most highlighters) or round ones.
+  const endButton = (round: boolean) => {
+    const label = round ? es.toolbar.highlightRound : es.toolbar.highlightSquare;
+    const button = h("button", { type: "button", class: "menu-option", role: "menuitemradio", title: label }, endIcon(round), h("span", {}, label));
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("click", () => onCommand(`highlight-ends:${round ? "round" : "square"}`));
+    return button;
+  };
+  const squareEnds = endButton(false);
+  const roundEnds = endButton(true);
+  colorMenu.append(
+    h("div", { class: "menu-options" }, squareEnds, roundEnds),
+    h("label", { class: "check menu-check" }, highlightPerWord, es.toolbar.highlightPerWord),
+    removeHighlight,
+  );
   colorToggle.addEventListener("click", () => (colorMenu.hidden = !colorMenu.hidden));
   document.addEventListener("pointerdown", (event) => {
     if (!colorMenu.hidden && !colorMenu.contains(event.target as Node) && event.target !== colorToggle) colorMenu.hidden = true;
@@ -402,6 +427,8 @@ export function createToolbar(
       highlightChip.style.background = HIGHLIGHT_COLORS[state.highlightColor]?.value ?? HIGHLIGHT_COLORS[0].value;
       for (const { align, element } of aligns) element.classList.toggle("active", align === state.align);
       highlightPerWord.checked = state.highlightWords;
+      squareEnds.classList.toggle("active", !state.highlightRound);
+      roundEnds.classList.toggle("active", state.highlightRound);
     },
     setPanelShown(shown) {
       panelButton.classList.toggle("active", shown);

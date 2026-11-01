@@ -137,6 +137,7 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
         if (finite(r.scribbleWidth)) style.scribbleWidth = Math.max(0.3, Math.min(4, r.scribbleWidth));
         if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
         if (typeof r.highlightWords === "boolean") style.highlightWords = r.highlightWords;
+        if (typeof r.highlightRound === "boolean") style.highlightRound = r.highlightRound;
         return style;
       })
     : [];
