@@ -2,7 +2,7 @@
 // (so it looks exactly the same when opened again) and the sheet settings.
 // It is written with whatever hand is loaded; the hand is its own file.
 
-import { compactRunStyles, decodeBytes, paragraphCount, SCRIBBLE_KINDS, upgradeMarkV1, type RunStyle, type ScribbleKind } from "./rich-text";
+import { compactRunStyles, decodeBytes, MAX_TIPEX_UNDER, paragraphCount, SCRIBBLE_KINDS, upgradeMarkV1, type RunStyle, type ScribbleKind } from "./rich-text";
 import { DEFAULT_PAPER, type Naturalness, type PageSettings, type PaperKind, type PaperSettings } from "./settings";
 
 export const DOCUMENT_FORMAT = "chirographum-document";
@@ -140,6 +140,7 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
         if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
         if (typeof r.highlightWords === "boolean") style.highlightWords = r.highlightWords;
         if (typeof r.highlightRound === "boolean") style.highlightRound = r.highlightRound;
+        if (typeof r.tipexUnder === "string" && r.tipexUnder) style.tipexUnder = r.tipexUnder.replace(/[\r\n]+/g, " ").slice(0, MAX_TIPEX_UNDER);
         return style;
       })
     : [];

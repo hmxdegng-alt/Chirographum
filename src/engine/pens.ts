@@ -42,6 +42,8 @@ export interface PenModel {
   smear: number;
   /** How easily the writing hand smudges the line (graphite and wet gel most, ballpoint barely). */
   smudge: number;
+  /** How often the tip leaves a lump of ink when "Grumos de tinta" is up (ballpoints most, pencils never). */
+  blobProne: number;
   /** Edge softness in millimetres (pencil and felt tips are fuzzier than gel). */
   softnessMm: number;
   /** Running out of ink (0–1): gaps and faint stretches whatever "El boli falla" says. */
@@ -99,6 +101,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.06,
     endBlob: 0.04,
     skipProne: 0.6,
+    blobProne: 0.45,
     smear: 1,
     smudge: 1,
     softnessMm: 0.012,
@@ -119,6 +122,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.06,
     endBlob: 0.04,
     skipProne: 0.6,
+    blobProne: 0.4,
     smear: 0.9,
     smudge: 0.9,
     softnessMm: 0.012,
@@ -139,6 +143,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.28,
     endBlob: 0,
     skipProne: 1,
+    blobProne: 1,
     smear: 0.12,
     smudge: 0.2,
     softnessMm: 0.02,
@@ -159,6 +164,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.18,
     endBlob: 0.12,
     skipProne: 0.5,
+    blobProne: 0.12,
     smear: 1.2,
     smudge: 0.8,
     softnessMm: 0.03,
@@ -179,6 +185,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.1,
     endBlob: 0.06,
     skipProne: 0.8,
+    blobProne: 0.1,
     smear: 0.8,
     smudge: 0.6,
     softnessMm: 0.04,
@@ -199,6 +206,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    blobProne: 0,
     smear: 0.35,
     smudge: 1.2,
     softnessMm: 0.04,
@@ -220,6 +228,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    blobProne: 0,
     smear: 0.15,
     smudge: 0.5,
     softnessMm: 0.03,
@@ -240,6 +249,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    blobProne: 0,
     smear: 0.25,
     smudge: 0.8,
     softnessMm: 0.02,

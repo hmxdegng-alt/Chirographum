@@ -14,7 +14,7 @@ import {
 } from "../src/engine/hand";
 import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
 import { decodeIds, documentTitle, DocumentFormatError, encodeIds, parseDocument, serializeDocument } from "../src/engine/document";
-import { glyphPointToPage, layoutText } from "../src/engine/layout";
+import { glyphPointToPage, layoutText, placeUnderTape, tapeRoom, tapeSpan, underTextOf } from "../src/engine/layout";
 import {
   applyRunStyle,
   BOLD,
@@ -46,7 +46,7 @@ import { createRng, deriveSeed } from "../src/engine/random";
 import { scribbleStrokes } from "../src/engine/scribble";
 import { sliderZone } from "../src/ui/dom";
 import { penById, wornPen } from "../src/engine/pens";
-import { A4, presetById, randomNaturalness } from "../src/engine/settings";
+import { A4, PRESETS, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
 const { isAllowedUrl } = require("../electron/network-guard.cjs") as {
@@ -298,6 +298,46 @@ describe("random preset", () => {
   });
 });
 
+describe("presets", () => {
+  it("go from the most careful to the joke, every one with every value", () => {
+    expect(PRESETS.map((p) => p.label)).toEqual(["Calígrafo", "Cuidadoso", "Normal", "Apuntes de clase", "Con prisa", "Cansado", "Infantil", "Letra de médico"]);
+    const keys = Object.keys(presetById("normal").values).sort();
+    for (const preset of PRESETS) {
+      expect(Object.keys(preset.values).sort()).toEqual(keys);
+      for (const value of Object.values(preset.values)) expect(Number.isFinite(value)).toBe(true);
+    }
+    expect(presetById("nope").id).toBe("normal");
+    // Only a tired writer gets worse along the text by default.
+    expect(presetById("calligrapher").values.fatigue).toBe(0);
+    expect(presetById("tired").values.fatigue).toBeGreaterThan(0.5);
+  });
+
+  it("a tired writer starts as usual and gets messier page after page", () => {
+    const hand = syntheticHand("abcdefghij");
+    const text = Array.from({ length: 3200 }, (_, i) => "abcdefghij"[i % 10] + (i % 6 === 5 ? " " : "")).join("");
+    const base = { ...presetById("normal").values, fatigue: 0 };
+    const fresh = layoutText(text, hand, A4, base, 5);
+    const tired = layoutText(text, hand, A4, { ...base, fatigue: 1 }, 5);
+    expect(tired.pageCount).toBeGreaterThan(1);
+    const spread = (r: typeof fresh, page: number) => {
+      const on = r.glyphs.filter((g) => g.page === page);
+      return on.reduce((sum, g) => sum + Math.abs(g.rotation), 0) / on.length;
+    };
+    // The first letters are written fresh; later pages are messier.
+    expect(tired.glyphs[0].rotation).toBeCloseTo(fresh.glyphs[0].rotation, 6);
+    expect(spread(tired, 1)).toBeGreaterThan(spread(fresh, 1) * 1.5);
+    // Same letters, same drawings: only how much they deviate changes.
+    expect(tired.glyphs.map((g) => g.variantIndex)).toEqual(fresh.glyphs.map((g) => g.variantIndex));
+  });
+
+  it("lumps of ink come mostly from ballpoints, never from pencils", () => {
+    expect(penById("ballpoint-10").blobProne).toBe(1);
+    expect(penById("gel-07").blobProne).toBeLessThan(1);
+    expect(penById("marker-medium").blobProne).toBeLessThan(penById("gel-07").blobProne);
+    expect(penById("pencil-hb").blobProne).toBe(0);
+  });
+});
+
 const documentDefaults = {
   penId: "gel-07",
   inkColor: "#22399a",
@@ -339,7 +379,7 @@ describe("documents", () => {
       charIds: Array.from({ length: 31 }, (_, i) => (i * 2654435761) >>> 0),
       marks: Array.from({ length: 31 }, (_, i) => withRunStyle(i % 5 === 0 ? BOLD | UNDERLINE : 0, i < 7 ? 1 : i > 20 ? 2 : 0)),
       paragraphs: [encodeParagraph({ style: "title", align: "center" }), 0, 0],
-      runStyles: [{ penId: "marker-medium", color: "#b42128" }, { size: 2 }],
+      runStyles: [{ penId: "marker-medium", color: "#b42128" }, { size: 2, tipexUnder: "lo de antes" }],
       settings: { ...defaults, penId: "fineliner", seed: 7, page: { ...A4, xHeightMm: 4 }, paper: { ...defaults.paper, kind: "lined" as const } },
     };
     expect(doc.text.length).toBe(31);
@@ -366,6 +406,8 @@ describe("documents", () => {
     expect(doc.settings.penId).toBe("gel-05");
     expect(doc.settings.naturalness.rotation).toBe(0.9);
     expect(doc.settings.naturalness.lineSlope).toBe(0);
+    expect(doc.settings.naturalness.inkBlobs).toBe(defaults.naturalness.inkBlobs);
+    expect(doc.settings.naturalness.fatigue).toBe(0);
     expect(doc.settings.page).toEqual(A4);
     expect(doc.charIds).toEqual([]);
     expect(doc.marks).toEqual([0, 0, 0, 0]);
@@ -644,25 +686,76 @@ describe("corrections by hand", () => {
     expect(glyphAt(r, 3).xMm).toBeCloseTo(glyphAt(r, 2).xMm, 5);
   });
 
-  it("words added above the line sit higher, smaller, over the gap, with a caret", () => {
+  it("words added above or below the line: smaller, between the lines, over the gap, no caret", () => {
     const text = "con mis amigos";
     const plain = layoutText(text, hand, A4, nat, 3);
-    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 4, 7, "above") });
-    expect(glyphAt(r, 4).yMm).toBeLessThan(glyphAt(r, 0).yMm - A4.lineSpacingMm * 0.4);
-    expect(glyphAt(r, 4).scale).toBeLessThan(glyphAt(r, 0).scale);
-    // "amigos" moves left: there is a single gap where "mis" was.
-    expect(glyphAt(r, 8).xMm).toBeLessThan(glyphAt(plain, 8).xMm - 3);
-    const caret = r.decorations.find((d) => d.kind === "caret")!;
-    expect(caret.x0).toBeGreaterThan(glyphAt(r, 2).xMm);
-    expect(caret.x1).toBeLessThan(glyphAt(r, 8).xMm + glyphAt(r, 8).widthMm);
+    for (const where of ["above", "below"] as const) {
+      const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 4, 7, where) });
+      const shift = glyphAt(r, 4).yMm - glyphAt(r, 0).yMm;
+      if (where === "above") expect(shift).toBeLessThan(-A4.lineSpacingMm * 0.4);
+      else expect(shift).toBeGreaterThan(A4.lineSpacingMm * 0.4);
+      expect(glyphAt(r, 4).scale).toBeLessThan(glyphAt(r, 0).scale);
+      // "amigos" moves left: there is a single gap where "mis" was, and the words go over it.
+      expect(glyphAt(r, 8).xMm).toBeLessThan(glyphAt(plain, 8).xMm - 3);
+      expect(glyphAt(r, 4).xMm).toBeGreaterThan(glyphAt(r, 0).xMm);
+      expect(glyphAt(r, 6).xMm).toBeLessThan(glyphAt(r, 8).xMm + glyphAt(r, 8).widthMm);
+      expect(r.decorations).toHaveLength(0);
+    }
   });
 
-  it("correction fluid makes a patch; typing after a correction is plain; clearing removes it", () => {
+  it("correction tape covers the run; typing after a correction is plain; clearing removes it", () => {
     const text = "uno dos";
     const marks = mark(text, 4, 7, "tipex");
     const r = layoutText(text, hand, A4, nat, 3, undefined, { marks });
-    expect(r.decorations.filter((d) => d.kind === "tipex")).toHaveLength(1);
+    const tapes = r.decorations.filter((d) => d.kind === "tipex");
+    expect(tapes).toHaveLength(1);
+    expect([tapes[0].start, tapes[0].end]).toEqual([4, 6]);
+    const span = tapeSpan(tapes[0]);
+    expect(span.from).toBeLessThan(tapes[0].x0);
+    expect(span.to).toBeGreaterThan(tapes[0].x1);
+    expect(r.hidden).toHaveLength(0);
     expect(correctionOf(marks[5])).toBe("tipex");
     expect(correctionOf(clearFlags(marks, 0, text.length)[5])).toBeNull();
+  });
+
+  it("text under the tape: placed under it, as long as the tape and no longer", () => {
+    const text = "uno dos tres";
+    const styled = applyRunStyle(mark(text, 4, 12, "tipex"), [], 4, 12, { tipexUnder: "tod" });
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: styled.marks, runStyles: styled.styles });
+    const tape = r.decorations.find((d) => d.kind === "tipex")!;
+    expect(r.hidden.map((g) => g.char).join("")).toBe("tod");
+    const room = tapeRoom(tape);
+    for (const g of r.hidden) {
+      expect(g.xMm).toBeGreaterThanOrEqual(room.from - 1e-6);
+      expect(g.xMm + g.widthMm).toBeLessThanOrEqual(room.to + 1e-6);
+      expect(Math.abs(g.yMm - tape.y0)).toBeLessThan(A4.xHeightMm);
+    }
+    // Hidden letters are not part of the text: the visible ones are unchanged.
+    const plain = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 4, 12, "tipex") });
+    expect(r.glyphs.map((g) => g.xMm)).toEqual(plain.glyphs.map((g) => g.xMm));
+    // Measured in millimetres: a long text does not fit and is cut where the tape ends.
+    const long = placeUnderTape("todo esto no cabe debajo de la cinta", tape, styled.marks[4], hand, A4, nat, 3, styled.styles);
+    expect(long.widthMm).toBeGreaterThan(long.roomMm);
+    expect(long.glyphs.length).toBeGreaterThan(0);
+    expect(Math.max(...long.glyphs.map((g) => g.xMm + g.widthMm))).toBeLessThanOrEqual(room.to + 1e-6);
+    const short = placeUnderTape("un", tape, styled.marks[4], hand, A4, nat, 3, styled.styles);
+    expect(short.widthMm).toBeLessThan(short.roomMm);
+  });
+
+  it("a run of tape that goes on to the next line hides its text only once", () => {
+    const words = Array.from({ length: 40 }, () => "dos").join(" ");
+    const styled = applyRunStyle(mark(words, 0, words.length, "tipex"), [], 0, words.length, { tipexUnder: "uno" });
+    const r = layoutText(words, hand, A4, nat, 3, undefined, { marks: styled.marks, runStyles: styled.styles });
+    const tapes = r.decorations.filter((d) => d.kind === "tipex");
+    expect(tapes.length).toBeGreaterThan(1);
+    expect(underTextOf(words, styled.marks, styled.styles, tapes[0])).toBe("uno");
+    expect(underTextOf(words, styled.marks, styled.styles, tapes[1])).toBe("");
+    expect(r.hidden).toHaveLength(3);
+  });
+
+  it("the text under the tape is part of the run style and is kept in documents", () => {
+    const styled = applyRunStyle([0, 0], [], 0, 2, { tipexUnder: "hola" });
+    expect(styled.styles[0].tipexUnder).toBe("hola");
+    expect(applyRunStyle(styled.marks, styled.styles, 0, 2, { tipexUnder: undefined }).marks.map(runStyleIndex)).toEqual([0, 0]);
   });
 });

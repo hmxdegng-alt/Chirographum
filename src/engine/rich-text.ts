@@ -57,7 +57,12 @@ export interface RunStyle {
   highlightWords?: boolean;
   /** Round highlighter ends (a worn or bullet tip) instead of the chisel's square ones. */
   highlightRound?: boolean;
+  /** What was written before the correction tape went over it. */
+  tipexUnder?: string;
 }
+
+/** Longest text that can be written under a piece of correction tape. */
+export const MAX_TIPEX_UNDER = 120;
 
 export function scribbleStyleOf(style: RunStyle | undefined): ScribbleStyle {
   return {
@@ -93,7 +98,8 @@ export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
     sa.width === sb.width &&
     sa.perWord === sb.perWord &&
     Boolean(a.highlightWords) === Boolean(b.highlightWords) &&
-    Boolean(a.highlightRound) === Boolean(b.highlightRound)
+    Boolean(a.highlightRound) === Boolean(b.highlightRound) &&
+    (a.tipexUnder ?? "") === (b.tipexUnder ?? "")
   );
 }
 
@@ -109,6 +115,7 @@ export function cleanRunStyle(style: RunStyle): RunStyle {
   if (style.scribbleWords) clean.scribbleWords = true;
   if (style.highlightWords) clean.highlightWords = true;
   if (style.highlightRound) clean.highlightRound = true;
+  if (style.tipexUnder) clean.tipexUnder = style.tipexUnder.slice(0, MAX_TIPEX_UNDER);
   return clean;
 }
 
@@ -191,11 +198,11 @@ export function withHighlightColor(marks: number, index: number): number {
 }
 
 /**
- * Ways of correcting by hand: written on correction fluid, written over by
+ * Ways of correcting by hand: written on correction tape, written over by
  * what comes next, rubbed out with an eraser (what comes next is written on
- * top), or added above the line with a caret ^.
+ * top), or added between the lines, above or below.
  */
-export const CORRECTIONS = ["tipex", "over", "erase", "above"] as const;
+export const CORRECTIONS = ["tipex", "over", "erase", "above", "below"] as const;
 export type Correction = (typeof CORRECTIONS)[number];
 const CORRECTION_SHIFT = 17;
 

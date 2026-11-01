@@ -93,15 +93,48 @@ export interface Naturalness {
   highlighterSmear: number;
   /** The writing hand rubs over fresh ink or graphite now and then (0–1). */
   handSmudges: number;
+  /**
+   * The writer tires: the imperfections grow along the page and from page to
+   * page (0 = the same all the way). The only thing that depends on where a
+   * letter is; it grows smoothly, so an edit only nudges what comes after.
+   */
+  fatigue: number;
+  /** Lumps of ink the tip leaves now and then, mostly ballpoints (0–1). */
+  inkBlobs: number;
 }
 
 export interface Preset {
   id: string;
   label: string;
+  /** What the preset is like, for the ones whose name does not say it all. */
+  description?: string;
   values: Naturalness;
 }
 
 export const PRESETS: Preset[] = [
+  {
+    id: "calligrapher",
+    label: "Calígrafo",
+    description: "Letra de libro: casi sin variación, renglones rectos.",
+    values: {
+      sizeVariation: 0.08,
+      rotation: 0.08,
+      slantDegrees: 0,
+      slantVariation: 0.06,
+      baselineWobble: 0.08,
+      lineDrift: 0.05,
+      spacingVariation: 0.08,
+      edgeShrink: 0.05,
+      marginDrift: 0.05,
+      inkTexture: 0.25,
+      lineSlope: 0,
+      inkSkips: 0,
+      highlighterSmear: 0.1,
+      handSmudges: 0,
+      fatigue: 0,
+      inkBlobs: 0,
+    },
+  },
   {
     id: "careful",
     label: "Cuidadoso",
@@ -120,6 +153,8 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.2,
       handSmudges: 0,
+      fatigue: 0,
+      inkBlobs: 0.1,
     },
   },
   {
@@ -140,6 +175,31 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.45,
       handSmudges: 0.05,
+      fatigue: 0,
+      inkBlobs: 0.25,
+    },
+  },
+  {
+    id: "notes",
+    label: "Apuntes de clase",
+    description: "Más deprisa y más inclinada, espacios irregulares, letra que se encoge al llegar al borde.",
+    values: {
+      sizeVariation: 0.6,
+      rotation: 0.55,
+      slantDegrees: 6,
+      slantVariation: 0.5,
+      baselineWobble: 0.55,
+      lineDrift: 0.7,
+      spacingVariation: 0.75,
+      edgeShrink: 0.95,
+      marginDrift: 0.7,
+      inkTexture: 0.6,
+      lineSlope: 0.4,
+      inkSkips: 0.05,
+      highlighterSmear: 0.6,
+      handSmudges: 0.15,
+      fatigue: 0.25,
+      inkBlobs: 0.35,
     },
   },
   {
@@ -160,6 +220,77 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.75,
       handSmudges: 0.15,
+      fatigue: 0.2,
+      inkBlobs: 0.4,
+    },
+  },
+  {
+    id: "tired",
+    label: "Cansado",
+    description: "Empieza bien y se va estropeando, línea a línea y página a página.",
+    values: {
+      sizeVariation: 0.35,
+      rotation: 0.3,
+      slantDegrees: 0,
+      slantVariation: 0.3,
+      baselineWobble: 0.35,
+      lineDrift: 0.4,
+      spacingVariation: 0.35,
+      edgeShrink: 0.45,
+      marginDrift: 0.35,
+      inkTexture: 0.55,
+      lineSlope: -0.6,
+      inkSkips: 0.05,
+      highlighterSmear: 0.5,
+      handSmudges: 0.1,
+      fatigue: 0.9,
+      inkBlobs: 0.3,
+    },
+  },
+  {
+    id: "child",
+    label: "Infantil",
+    description: "Letras de tamaños muy distintos, torcidas y separadas a saltos.",
+    values: {
+      sizeVariation: 1.2,
+      rotation: 0.9,
+      slantDegrees: -2,
+      slantVariation: 0.9,
+      baselineWobble: 1.0,
+      lineDrift: 0.9,
+      spacingVariation: 1.0,
+      edgeShrink: 0.6,
+      marginDrift: 0.9,
+      inkTexture: 0.7,
+      lineSlope: 0,
+      inkSkips: 0,
+      highlighterSmear: 0.7,
+      handSmudges: 0.35,
+      fatigue: 0.15,
+      inkBlobs: 0.2,
+    },
+  },
+  {
+    id: "doctor",
+    label: "Letra de médico",
+    description: "Casi ilegible (es una broma, pero funciona).",
+    values: {
+      sizeVariation: 1.5,
+      rotation: 1.4,
+      slantDegrees: 18,
+      slantVariation: 1.3,
+      baselineWobble: 1.4,
+      lineDrift: 1.3,
+      spacingVariation: 1.4,
+      edgeShrink: 1.3,
+      marginDrift: 1.0,
+      inkTexture: 0.8,
+      lineSlope: 1.5,
+      inkSkips: 0.15,
+      highlighterSmear: 0.8,
+      handSmudges: 0.2,
+      fatigue: 0.4,
+      inkBlobs: 0.4,
     },
   },
 ];
@@ -167,7 +298,7 @@ export const PRESETS: Preset[] = [
 export const DEFAULT_PRESET_ID = "normal";
 
 export function presetById(id: string): Preset {
-  return PRESETS.find((preset) => preset.id === id) ?? PRESETS[1];
+  return PRESETS.find((preset) => preset.id === id) ?? PRESETS.find((preset) => preset.id === DEFAULT_PRESET_ID)!;
 }
 
 /**

@@ -10,7 +10,7 @@
 
 import { resample, type Sample } from "./geometry";
 import type { Hand } from "./hand";
-import { glyphPointToPage, type Decoration, type LayoutResult } from "./layout";
+import { glyphPointToPage, TAPE_WIDTH_MM, tapeSpan, type Decoration, type LayoutResult, type PlacedGlyph } from "./layout";
 import { PENCIL_COLOR, penById, wornPen, type PenModel } from "./pens";
 import { createRng, deriveSeed, type Rng } from "./random";
 import { HIGHLIGHT_COLORS, scribbleStyleOf, type RunStyle } from "./rich-text";
@@ -167,6 +167,15 @@ interface StrokeGeometry {
   chisel?: { x: number; y: number; seed: number; poolStart: number; poolEnd: number };
   /** Seed for what is drawn over the stroke afterwards (dry streaks), from the letter's identity. */
   seed?: number;
+  /** Lumps of ink left along the line (centre, radii along and across, direction), in pixels. */
+  lumps?: { x: number; y: number; along: number; across: number; angle: number }[];
+}
+
+/** How far ink can reach past the line's half width: pooled ends and lumps. */
+function blobReach(g: StrokeGeometry): number {
+  let reach = Math.max(g.startBlob, g.endBlob);
+  for (const lump of g.lumps ?? []) reach = Math.max(reach, lump.along);
+  return reach;
 }
 
 /**
@@ -340,14 +349,41 @@ function strokeGeometry(
     }
     tones.push(tone);
   }
-  return {
+  const geometry: StrokeGeometry = {
     samples,
     widths,
     tones,
     startBlob: pen.startBlob > 0 ? (widths[0] / 2) * (1 + pen.startBlob * (0.5 + rng.next())) : 0,
     endBlob: pen.endBlob > 0 ? (widths[widths.length - 1] / 2) * (1 + pen.endBlob * (0.3 + rng.next())) : 0,
   };
+  // Lumps of ink: the ball picks up a little too much and leaves it on the
+  // paper, mostly where the stroke starts. Drawn last from the stroke's own
+  // random numbers, so the rest of the stroke does not change with the slider.
+  const lumpRate = (nat.inkBlobs ?? 0) * pen.blobProne * LUMPS_PER_MM;
+  if (lumpRate > 0 && samples.length > 2) {
+    const count = Math.floor(lumpRate * (length / pxPerMm) + rng.next());
+    for (let n = 0; n < count; n++) {
+      const s = rng.next() < 0.35 ? rng.next() * Math.min(0.2 * length, 0.6 * pxPerMm) : rng.next() * length;
+      const i = Math.max(1, Math.min(samples.length - 1, samples.findIndex((sample) => sample.s >= s)));
+      const a = samples[i - 1];
+      const b = samples[i];
+      const half = widths[i] / 2;
+      const angle = Math.atan2(b.y - a.y, b.x - a.x);
+      const side = (rng.next() - 0.5) * 0.5 * half;
+      (geometry.lumps ??= []).push({
+        x: b.x - Math.sin(angle) * side,
+        y: b.y + Math.cos(angle) * side,
+        along: half * (1.7 + 1.5 * rng.next()),
+        across: half * (1.25 + 0.6 * rng.next()),
+        angle,
+      });
+    }
+  }
+  return geometry;
 }
+
+/** Lumps of ink per millimetre of line at "Grumos de tinta" 100 % with a ballpoint. */
+const LUMPS_PER_MM = 0.03;
 
 /** Draws a stroke as tone (grey levels) with "lighten", so it never darkens itself. */
 function drawTone(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
@@ -382,6 +418,16 @@ function drawTone(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, 
     ctx.fillStyle = toneStyle(tones[tones.length - 1]);
     ctx.beginPath();
     ctx.arc(last.x - dx, last.y - dy, g.endBlob, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Lumps: full ink, a little oval along the line, with a short drag behind.
+  for (const lump of g.lumps ?? []) {
+    ctx.fillStyle = toneStyle(1);
+    ctx.beginPath();
+    ctx.ellipse(lump.x - dx, lump.y - dy, lump.along, lump.across, lump.angle, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(lump.x - dx - Math.cos(lump.angle) * lump.along, lump.y - dy - Math.sin(lump.angle) * lump.along, lump.along * 0.7, lump.across * 0.75, lump.angle, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -572,7 +618,7 @@ function blurRegion(ctx: CanvasRenderingContext2D, box: InkBox, radiusPx: number
 function markerLayers(strokes: StrokeGeometry[], cellPx: number): StrokeGeometry[][] {
   const layers: { strokes: StrokeGeometry[]; cells: Set<number> }[] = [];
   for (const g of strokes) {
-    const reach = Math.ceil((Math.max(...g.widths) / 2 + Math.max(g.startBlob, g.endBlob)) / cellPx) + 1;
+    const reach = Math.ceil((Math.max(...g.widths) / 2 + blobReach(g)) / cellPx) + 1;
     const cells = new Set<number>();
     for (const s of g.samples) {
       const cx = Math.floor(s.x / cellPx);
@@ -596,7 +642,7 @@ function strokesBox(strokes: StrokeGeometry[], extra: number, width: number, hei
   let x1 = -Infinity;
   let y1 = -Infinity;
   for (const g of strokes) {
-    const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + extra;
+    const pad = Math.max(...g.widths) + blobReach(g) + extra;
     for (const s of g.samples) {
       x0 = Math.min(x0, s.x - pad);
       y0 = Math.min(y0, s.y - pad);
@@ -609,6 +655,7 @@ function strokesBox(strokes: StrokeGeometry[], extra: number, width: number, hei
 
 /** Highlighter: a wide translucent felt tip whose layers darken where they overlap. */
 const HIGHLIGHTER: PenModel = {
+  blobProne: 0,
   id: "highlighter",
   label: "Subrayador",
   kind: "marker",
@@ -677,100 +724,212 @@ function rubbedOut(pen: PenModel): PenModel {
   };
 }
 
-/** The ^ that marks where words written above the line go. */
-function caretMark(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
-  const rng = createRng(deriveSeed(d.seed, "caret"));
-  const xh = d.xhMm;
-  const mid = (d.x0 + d.x1) / 2 + (rng.next() - 0.5) * 0.1 * xh;
-  const half = (d.x1 - d.x0) / 2 * (0.8 + 0.4 * rng.next());
-  const apex = d.y0 - (0.05 + 0.2 * rng.next()) * xh;
-  const foot = d.y0 + (0.5 + 0.25 * rng.next()) * xh;
-  const lean = (rng.next() - 0.5) * 0.15 * xh;
-  return [
-    { x: mid - half + lean, y: foot, p: 0.7 },
-    { x: mid - half * 0.45 + lean * 0.5, y: (foot + apex) / 2, p: 0.85 },
-    { x: mid, y: apex, p: 0.9 },
-    { x: mid + half * 0.45 - lean * 0.5, y: (foot + apex) / 2, p: 0.85 },
-    { x: mid + half - lean, y: foot + (rng.next() - 0.5) * 0.1 * xh, p: 0.65 },
-  ].map((p) => ({ x: p.x * pxPerMm, y: p.y * pxPerMm, p: p.p }));
+/** How a piece of correction tape ends: cut clean, torn on the dispenser's teeth, or with a strip of tape left over. */
+type TapeEnd = "straight" | "teeth" | "tongue";
+
+function pickTapeEnd(rng: Rng, last: boolean): TapeEnd {
+  const r = rng.next();
+  if (last) return r < 0.3 ? "straight" : r < 0.7 ? "teeth" : "tongue";
+  return r < 0.55 ? "straight" : r < 0.8 ? "teeth" : "tongue";
 }
 
 /**
- * Correction fluid over a run of words: two or three wavy brush passes of
- * white, with a faint grey rim where the dried fluid stands up from the paper
- * and a few brush marks inside. Drawn under the ink. Returns the area it covers.
+ * The outline of one end of the tape, across it from one edge (v = -w/2) to
+ * the other (v = w/2), as distances out past the nominal end, in millimetres.
  */
-function drawTipex(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: number): InkBox | null {
-  const rng = createRng(deriveSeed(d.seed, "tipex"));
+function tapeEndProfile(kind: TapeEnd, rng: Rng, width: number): { out: number; v: number }[] {
+  const half = width / 2;
+  const points: { out: number; v: number }[] = [];
+  if (kind === "teeth") {
+    // The serrated blade of the dispenser: small, uneven teeth, the cut a little crooked.
+    const tilt = (rng.next() - 0.5) * 2 * Math.tan(6 * DEG);
+    const pitch = 0.5 + 0.35 * rng.next();
+    const count = Math.max(4, Math.round(width / pitch)) * 2;
+    const depth = 0.22 + 0.28 * rng.next();
+    for (let i = 0; i <= count; i++) {
+      const v = -half + (width * i) / count;
+      const tooth = i % 2 === 1 ? depth * (0.6 + 0.7 * rng.next()) : 0;
+      points.push({ out: tilt * v + tooth, v });
+    }
+    return points;
+  }
+  const tilt = (rng.next() - 0.5) * 2 * Math.tan((kind === "tongue" ? 5 : 9) * DEG);
+  const wobble = () => (rng.next() - 0.5) * 0.06;
+  if (kind === "straight") {
+    for (let i = 0; i <= 4; i++) {
+      const v = -half + (width * i) / 4;
+      points.push({ out: tilt * v + (i > 0 && i < 4 ? wobble() : 0), v });
+    }
+    return points;
+  }
+  // A strip that did not tear off: narrower than the tape, often along one edge,
+  // a little crooked, ending in a ragged tear.
+  const tongueWidth = (0.3 + 0.45 * rng.next()) * width;
+  const place = rng.next();
+  const a = place < 0.35 ? -half : place < 0.7 ? half - tongueWidth : -half + (width - tongueWidth) * rng.next();
+  const b = a + tongueWidth;
+  const length = 0.7 + 2.3 * rng.next();
+  const lean = (rng.next() - 0.5) * 2 * Math.tan(8 * DEG) * length;
+  const narrow = (0.1 + 0.25 * rng.next()) * tongueWidth;
+  const base = (v: number) => tilt * v;
+  points.push({ out: base(-half), v: -half });
+  if (a > -half + 0.05) points.push({ out: base(a), v: a });
+  points.push({ out: base(a) + length * 0.97, v: a + narrow * 0.5 + lean });
+  const tears = 2 + Math.floor(rng.next() * 3);
+  for (let i = 1; i < tears; i++) {
+    const v = a + narrow * 0.5 + ((b - a - narrow) * i) / tears + lean;
+    points.push({ out: base(a) + length * (0.85 + 0.2 * rng.next()), v });
+  }
+  points.push({ out: base(b) + length * (0.9 + 0.1 * rng.next()), v: b - narrow * 0.5 + lean });
+  if (b < half - 0.05) points.push({ out: base(b), v: b });
+  points.push({ out: base(half), v: half });
+  return points;
+}
+
+/**
+ * Correction tape over a run of words. The tape is always the same width,
+ * laid very straight (a long piece bends a little), so big letters need
+ * several overlapping passes. Each pass is an outline in page pixels; the
+ * last one in the list was laid last.
+ */
+function tapePasses(d: Decoration, pxPerMm: number): { passes: Path2D[]; box: InkBox } | null {
+  const rng = createRng(deriveSeed(d.seed, "tape"));
   const xh = d.xhMm;
+  const width = TAPE_WIDTH_MM;
   const slope = (d.y1 - d.y0) / Math.max(0.01, d.x1 - d.x0);
   const baseAt = (x: number) => d.y0 + slope * (x - d.x0);
-  const left = d.x0 - (0.25 + 0.3 * rng.next()) * xh;
-  const right = d.x1 + (0.25 + 0.35 * rng.next()) * xh;
-  const top = -(1.5 + 0.3 * rng.next()) * xh;
-  const bottom = (0.5 + 0.25 * rng.next()) * xh;
-  const passes = rng.next() < 0.5 ? 2 : 3;
-  const thickness = ((bottom - top) / passes) * 1.45;
-  const pad = thickness;
-  const box = {
-    x: Math.floor((left - pad) * pxPerMm),
-    y: Math.floor((Math.min(baseAt(left), baseAt(right)) + top - pad) * pxPerMm),
-    width: Math.ceil((right - left + 2 * pad) * pxPerMm),
-    height: Math.ceil((bottom - top + Math.abs(baseAt(right) - baseAt(left)) + 2 * pad) * pxPerMm),
-  };
-  if (box.width <= 0 || box.height <= 0) return null;
-  const layer = createCanvas(box.width, box.height);
-  const l = layer.getContext("2d")!;
-  l.translate(-box.x, -box.y);
-  l.lineCap = "round";
-  l.lineJoin = "round";
-  const paths: Path2D[] = [];
-  for (let k = 0; k < passes; k++) {
-    const centre = top + (bottom - top) * ((k + 0.5) / passes) + (rng.next() - 0.5) * 0.12 * xh;
-    const wobble = noise1D(rng, 6);
-    const from = left + (rng.next() - 0.5) * 0.3 * xh;
-    const to = right + (rng.next() - 0.5) * 0.3 * xh;
+  const span = tapeSpan(d);
+  // What has to be covered: the letters' bodies and most of the tall strokes.
+  const top = -1.5 * xh;
+  const bottom = 0.3 * xh;
+  const needed = bottom - top;
+  const OVERLAP = 0.9;
+  const count = needed <= width ? 1 : Math.min(6, Math.ceil((needed - width) / (width - OVERLAP)) + 1);
+  const centres: number[] = [];
+  if (count === 1) centres.push(-0.6 * xh + (rng.next() - 0.5) * 0.5);
+  else for (let k = 0; k < count; k++) centres.push(top + width / 2 - 0.3 + ((needed - width + 0.6) * k) / (count - 1) + (rng.next() - 0.5) * 0.3);
+  // Top to bottom or the other way round.
+  if (rng.next() < 0.5) centres.reverse();
+  const passes: Path2D[] = [];
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (let k = 0; k < count; k++) {
+    const from = span.from + (k === 0 ? 0 : (rng.next() - 0.5) * 0.6);
+    const to = span.to + (k === 0 ? 0 : (rng.next() - 0.5) * 0.8);
+    const length = Math.max(1, to - from);
+    const angle = Math.atan(slope) + (rng.next() - 0.5) * 0.9 * DEG;
+    const dir = { x: Math.cos(angle), y: Math.sin(angle) };
+    const normal = { x: -dir.y, y: dir.x };
+    const origin = { x: from, y: baseAt(from) + centres[k] };
+    // Only a long piece bends, and only a little.
+    const bowAmount = length > 45 ? (rng.next() - 0.5) * 2 * Math.min(1.1, (length - 45) / 60) : 0;
+    const bow = (u: number) => bowAmount * Math.sin((Math.PI * Math.max(0, Math.min(length, u))) / length);
+    const startEnd = tapeEndProfile(pickTapeEnd(rng, false), rng, width);
+    const lastEnd = tapeEndProfile(pickTapeEnd(rng, true), rng, width);
+    const local: { u: number; v: number }[] = [];
+    for (let i = startEnd.length - 1; i >= 0; i--) local.push({ u: -startEnd[i].out, v: startEnd[i].v });
+    const STEP = 2;
+    for (let u = STEP; u < length; u += STEP) local.push({ u, v: -width / 2 });
+    for (const p of lastEnd) local.push({ u: length + p.out, v: p.v });
+    for (let u = Math.floor((length - 0.01) / STEP) * STEP; u > 0; u -= STEP) local.push({ u, v: width / 2 });
     const path = new Path2D();
-    const steps = Math.max(6, Math.ceil((to - from) / 1.2));
-    for (let i = 0; i <= steps; i++) {
-      const x = from + ((to - from) * i) / steps;
-      const y = baseAt(x) + centre + wobble(x) * 0.12 * xh;
-      if (i === 0) path.moveTo(x * pxPerMm, y * pxPerMm);
-      else path.lineTo(x * pxPerMm, y * pxPerMm);
-    }
-    paths.push(path);
+    local.forEach((p, i) => {
+      const v = p.v + bow(p.u);
+      const x = (origin.x + dir.x * p.u + normal.x * v) * pxPerMm;
+      const y = (origin.y + dir.y * p.u + normal.y * v) * pxPerMm;
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
+      if (i === 0) path.moveTo(x, y);
+      else path.lineTo(x, y);
+    });
+    path.closePath();
+    passes.push(path);
   }
-  l.lineWidth = thickness * pxPerMm;
-  l.strokeStyle = "#ffffff";
-  for (const path of paths) l.stroke(path);
-  // Brush marks: faint grey lines along the passes.
-  l.globalCompositeOperation = "source-atop";
-  l.lineWidth = Math.max(0.5, 0.05 * pxPerMm);
-  for (let s = 0; s < 6 + passes * 3; s++) {
-    const y = (Math.min(baseAt(left), baseAt(right)) + top + (bottom - top) * rng.next()) * pxPerMm;
-    l.strokeStyle = `rgba(110,110,110,${(0.04 + 0.05 * rng.next()).toFixed(3)})`;
-    l.beginPath();
-    l.moveTo((left + rng.next() * 0.3 * (right - left)) * pxPerMm, y);
-    l.lineTo((right - rng.next() * 0.3 * (right - left)) * pxPerMm, y + (rng.next() - 0.5) * 0.4 * pxPerMm);
-    l.stroke();
+  const pad = pxPerMm;
+  return { passes, box: { x: Math.floor(x0 - pad), y: Math.floor(y0 - pad), width: Math.ceil(x1 - x0 + 2 * pad), height: Math.ceil(y1 - y0 + 2 * pad) } };
+}
+
+/**
+ * Ink written on correction tape does not soak in: it beads on the plastic
+ * surface and dries thin, greyer and shinier, darker at the edges of the
+ * stroke than in the middle ("prebas de boli y lapiz.jpg"). Changes the ink
+ * already on the page inside the tape; ink outside it stays as it is.
+ */
+function inkOnTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox, strokePx: number, pxPerMm: number): void {
+  const box = clampBox(area, ctx.canvas.width, ctx.canvas.height);
+  if (!box) return;
+  const mask = createCanvas(box.width, box.height);
+  const m = mask.getContext("2d")!;
+  m.translate(-box.x, -box.y);
+  m.fillStyle = "#ffffff";
+  for (const path of passes) m.fill(path);
+  const maskData = m.getImageData(0, 0, box.width, box.height).data;
+  const blurred = createCanvas(box.width, box.height);
+  const b = blurred.getContext("2d")!;
+  b.filter = `blur(${Math.max(0.5, Math.min(0.25 * pxPerMm, strokePx * 0.33)).toFixed(2)}px)`;
+  b.drawImage(ctx.canvas, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+  const blurData = b.getImageData(0, 0, box.width, box.height).data;
+  const image = ctx.getImageData(box.x, box.y, box.width, box.height);
+  const data = image.data;
+  const SILVER = [112, 119, 132];
+  const cell = Math.max(1, 0.05 * pxPerMm);
+  for (let row = 0; row < box.height; row++) {
+    for (let col = 0; col < box.width; col++) {
+      const i = (row * box.width + col) * 4;
+      const a = data[i + 3];
+      const k = maskData[i + 3] / 255;
+      if (a === 0 || k === 0) continue;
+      // Middle of the stroke: the blurred ink is as strong as the ink itself.
+      const ratio = blurData[i + 3] / a;
+      const s = Math.max(0, Math.min(1, (ratio - 0.62) / 0.3));
+      const middle = s * s * (3 - 2 * s);
+      // The edges stay dark; the middle is thin, silvery and uneven where the ink beads.
+      const bead = dotNoise(Math.floor((box.x + col) / cell), Math.floor((box.y + row) / cell));
+      const keep = 1 - 0.58 * middle * (0.8 + 0.4 * bead);
+      data[i + 3] = Math.round(a * (1 - k + k * keep));
+      const grey = k * (0.12 + 0.6 * middle);
+      data[i] = Math.round(data[i] + (SILVER[0] - data[i]) * grey);
+      data[i + 1] = Math.round(data[i + 1] + (SILVER[1] - data[i + 1]) * grey);
+      data[i + 2] = Math.round(data[i + 2] + (SILVER[2] - data[i + 2]) * grey);
+    }
+  }
+  ctx.putImageData(image, box.x, box.y);
+  mask.width = 0;
+  blurred.width = 0;
+}
+
+/**
+ * Lays the tape under the ink (and over the paper's lines and whatever was
+ * written before): white, with only a hairline where each edge stands up
+ * from the paper and a faint shadow under it.
+ */
+function drawTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox, pxPerMm: number): void {
+  const layer = createCanvas(area.width, area.height);
+  const l = layer.getContext("2d")!;
+  l.translate(-area.x, -area.y);
+  l.lineJoin = "miter";
+  for (const path of passes) {
+    l.save();
+    l.filter = `blur(${Math.max(0.4, 0.06 * pxPerMm).toFixed(2)}px)`;
+    l.translate(0.03 * pxPerMm, 0.06 * pxPerMm);
+    l.fillStyle = "rgba(60, 64, 72, 0.13)";
+    l.fill(path);
+    l.restore();
+    l.fillStyle = "#fefefd";
+    l.fill(path);
+    l.strokeStyle = "rgba(105, 110, 120, 0.32)";
+    l.lineWidth = Math.max(0.6, 0.05 * pxPerMm);
+    l.stroke(path);
   }
   ctx.save();
   ctx.globalCompositeOperation = "destination-over";
-  ctx.drawImage(layer, box.x, box.y);
-  // The rim: the same shape in grey, a hair lower and to the right, softened.
-  ctx.filter = `blur(${Math.max(0.4, 0.06 * pxPerMm).toFixed(2)}px)`;
-  ctx.globalAlpha = 0.22;
-  const rim = createCanvas(box.width, box.height);
-  const r = rim.getContext("2d")!;
-  r.drawImage(layer, 0, 0);
-  r.globalCompositeOperation = "source-in";
-  r.fillStyle = "#6f6f6f";
-  r.fillRect(0, 0, box.width, box.height);
-  ctx.drawImage(rim, box.x + 0.1 * pxPerMm, box.y + 0.16 * pxPerMm);
+  ctx.drawImage(layer, area.x, area.y);
   ctx.restore();
   layer.width = 0;
-  rim.width = 0;
-  return box;
 }
 
 /** An eraser rubbed over pencil: a faint, streaky grey haze of spread graphite. */
@@ -959,24 +1118,28 @@ export function renderPage(
     strokes: StrokeGeometry[];
   }
   const groups = new Map<string, InkGroup>();
-  const groupFor = (style: number, erased = false): InkGroup => {
+  /** What was written before correction tape went over it: drawn apart, to go under the tape. */
+  const hiddenGroups = new Map<string, InkGroup>();
+  const groupFor = (style: number, erased = false, hidden = false): InkGroup => {
     const run = style > 0 ? runStyles[style - 1] : undefined;
     const used = wornPen(run?.penId ? penById(run.penId) : pen, options.wear ?? 0);
     const groupPen = erased ? rubbedOut(used) : used;
     const color = groupPen.kind === "pencil" ? PENCIL_COLOR : (run?.color ?? options.color);
     const key = `${groupPen.id}|${color}|${erased ? "erased" : "ink"}`;
-    let group = groups.get(key);
+    const map = hidden ? hiddenGroups : groups;
+    let group = map.get(key);
     if (!group) {
       group = { pen: groupPen, color, strokes: [] };
-      groups.set(key, group);
+      map.set(key, group);
     }
     return group;
   };
 
   // Geometry of every stroke on this page: letters (bold ones twice) and hand-drawn lines.
   const highlights: { geometry: StrokeGeometry; color: number; smear: number; seed: number }[] = [];
-  /** Correction fluid and eraser marks, drawn under the ink. */
+  /** Correction tape and eraser marks, drawn under the ink. */
   const corrections: { d: Decoration; graphite: boolean }[] = [];
+  const tapes: { passes: Path2D[]; box: InkBox; strokePx: number }[] = [];
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -984,7 +1147,7 @@ export function renderPage(
   let strokeCount = 0;
   const include = (group: InkGroup, g: StrokeGeometry, seed: number) => {
     g.seed = seed;
-    const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx({ ...options, pen: group.pen }) * 3 + 2;
+    const pad = Math.max(...g.widths) + blobReach(g) + softPx({ ...options, pen: group.pen }) * 3 + 2;
     for (const sample of g.samples) {
       minX = Math.min(minX, sample.x - pad);
       minY = Math.min(minY, sample.y - pad);
@@ -994,11 +1157,11 @@ export function renderPage(
     group.strokes.push(g);
     strokeCount++;
   };
-  for (const glyph of layout.glyphs) {
-    if (glyph.page !== options.pageIndex) continue;
+  const addGlyph = (glyph: PlacedGlyph, hidden: boolean) => {
+    if (glyph.page !== options.pageIndex) return;
     const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
-    if (!variant) continue;
-    const group = groupFor(glyph.style ?? 0, Boolean(glyph.erased));
+    if (!variant) return;
+    const group = groupFor(glyph.style ?? 0, Boolean(glyph.erased), hidden);
     // Bold: the writer goes over the letter again, a hair off the first pass.
     const passes = glyph.bold ? 2 : 1;
     const boldRng = createRng(deriveSeed(glyph.seed, "bold"));
@@ -1017,17 +1180,19 @@ export function renderPage(
         include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)), deriveSeed(glyph.seed, "stroke", strokeIndex, pass));
       });
     }
-  }
+  };
+  for (const glyph of layout.glyphs) addGlyph(glyph, false);
+  for (const glyph of layout.hidden ?? []) addGlyph(glyph, true);
   for (const d of layout.decorations) {
     if (d.page !== options.pageIndex) continue;
     const rng = createRng(deriveSeed(d.seed, "ink"));
-    if (d.kind === "tipex" || d.kind === "erased") {
-      corrections.push({ d, graphite: groupFor(d.style ?? 0).pen.kind === "pencil" });
+    if (d.kind === "tipex") {
+      const tape = tapePasses(d, pxPerMm);
+      if (tape) tapes.push({ ...tape, strokePx: groupFor(d.style ?? 0).pen.widthMm * widthScale * pxPerMm });
       continue;
     }
-    if (d.kind === "caret") {
-      const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(caretMark(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed);
+    if (d.kind === "erased") {
+      corrections.push({ d, graphite: groupFor(d.style ?? 0).pen.kind === "pencil" });
       continue;
     }
     if (d.kind === "scribble") {
@@ -1118,8 +1283,43 @@ export function renderPage(
     blurRegion(target, gb, soft);
     target.globalCompositeOperation = "source-over";
     toneToInk(target, gb, style);
+    // A lump is a thicker layer of ink sitting on the line: darker in its middle.
+    const lumps = group.strokes.flatMap((g) => g.lumps ?? []);
+    if (lumps.length > 0) {
+      const [r, gr, bl] = parseHex(group.color);
+      target.save();
+      target.fillStyle = `rgba(${r},${gr},${bl},${(0.55 * style.opacity).toFixed(3)})`;
+      if (soft > 0.35) target.filter = `blur(${soft.toFixed(2)}px)`;
+      for (const lump of lumps) {
+        target.beginPath();
+        target.ellipse(lump.x, lump.y, lump.along * 0.78, lump.across * 0.72, lump.angle, 0, Math.PI * 2);
+        target.fill();
+      }
+      target.restore();
+    }
     return gb;
   };
+
+  // 0. What the tape hides, drawn first and set aside until the tape is down.
+  let hiddenInk: { canvas: HTMLCanvasElement; box: InkBox } | null = null;
+  const underTape = [...hiddenGroups.values()].filter((group) => group.strokes.length > 0);
+  if (underTape.length > 0) {
+    const reach = Math.max(...underTape.map((group) => softPx({ ...options, pen: group.pen }))) * 3 + 6;
+    const hb = strokesBox(underTape.flatMap((group) => group.strokes), reach, canvas.width, canvas.height);
+    if (hb) {
+      const saved = createCanvas(hb.width, hb.height);
+      const sctx = saved.getContext("2d")!;
+      for (const group of underTape) {
+        ctx.globalCompositeOperation = "source-over";
+        const used = drawGroup(ctx, group);
+        if (!used) continue;
+        sctx.drawImage(canvas, hb.x, hb.y, hb.width, hb.height, 0, 0, hb.width, hb.height);
+        ctx.clearRect(used.x, used.y, used.width, used.height);
+      }
+      ctx.globalCompositeOperation = "source-over";
+      hiddenInk = { canvas: saved, box: hb };
+    }
+  }
 
   // 1. The ink. One instrument draws straight on the page; several each get a layer.
   const inkGroups = [...groups.values()].filter((group) => group.strokes.length > 0);
@@ -1147,6 +1347,8 @@ export function renderPage(
     printed: printedStrength(options),
     pxPerMm,
   };
+  // 1a. Ink written on correction tape beads and dries grey, hollow in the middle.
+  for (const tape of tapes) inkOnTape(ctx, tape.passes, tape.box, tape.strokePx, pxPerMm);
 
   // 1b. A water-based highlighter drags a little fresh ink along: a faint
   // trail after each letter, inside the band, in the direction it was drawn.
@@ -1287,10 +1489,23 @@ export function renderPage(
     layer.width = 0;
   }
 
-  // 2b. Corrections under the ink: correction fluid hides the paper's lines
-  // too; an eraser leaves a faint grey haze of graphite.
+  // 2b. Corrections under the ink: the tape hides the paper's lines and what
+  // was written before it; an eraser leaves a faint grey haze of graphite.
+  for (const tape of tapes) {
+    const area = clampBox(tape.box, canvas.width, canvas.height);
+    if (!area) continue;
+    drawTape(ctx, tape.passes, area, pxPerMm);
+    fullBox = unionBox(fullBox, area, canvas.width, canvas.height);
+  }
+  if (hiddenInk) {
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-over";
+    ctx.drawImage(hiddenInk.canvas, hiddenInk.box.x, hiddenInk.box.y);
+    ctx.restore();
+    hiddenInk.canvas.width = 0;
+  }
   for (const { d, graphite } of corrections) {
-    const area = d.kind === "tipex" ? drawTipex(ctx, d, pxPerMm) : graphite ? drawEraserHaze(ctx, d, pxPerMm) : null;
+    const area = graphite ? drawEraserHaze(ctx, d, pxPerMm) : null;
     fullBox = unionBox(fullBox, area ? clampBox(area, canvas.width, canvas.height) : null, canvas.width, canvas.height);
   }
 

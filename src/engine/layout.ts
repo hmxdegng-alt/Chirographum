@@ -21,6 +21,7 @@ import {
   STYLE_LOOK,
   UNDERLINE,
   type Alignment,
+  withRunStyle,
   type RunStyle,
 } from "./rich-text";
 import { paperFirstLine, paperRuling, type Naturalness, type PageSettings, type PaperSettings } from "./settings";
@@ -58,10 +59,10 @@ export interface PlacedGlyph {
 
 /**
  * Something drawn by hand over or under the text: underline, strikethrough,
- * highlighter, scribble, correction fluid, eraser marks or an insertion caret.
+ * highlighter, scribble, correction tape or eraser marks.
  */
 export interface Decoration {
-  kind: "underline" | "strike" | "highlight" | "scribble" | "tipex" | "erased" | "caret";
+  kind: "underline" | "strike" | "highlight" | "scribble" | "tipex" | "erased";
   page: number;
   x0: number;
   y0: number;
@@ -74,6 +75,9 @@ export interface Decoration {
   /** Run style of the words it is drawn on (instrument and colour). */
   style: number;
   seed: number;
+  /** First and last character of the text it covers. */
+  start: number;
+  end: number;
 }
 
 /** Formatting and paper, all optional: without them the text is plain. */
@@ -113,6 +117,8 @@ export interface LayoutResult {
   missing: string[];
   missingBoxes: MissingBox[];
   decorations: Decoration[];
+  /** Letters written before correction tape went over them (not part of the text). */
+  hidden: PlacedGlyph[];
   /** One stop per character of the text, plus one at the end. */
   carets: CaretStop[];
   pageCount: number;
@@ -127,15 +133,31 @@ interface GlyphPlan {
   /** Ink width in x-height units, before scaling. */
   width: number;
   offsetX: number;
-  size: number;
+  /** The letter's own deviations from a perfect letter; tiredness makes them grow. */
+  sizeDev: number;
   rotation: number;
-  slant: number;
+  /** The writer's slant (and italic), in degrees, and this letter's deviation from it. */
+  slantBase: number;
+  slantDev: number;
   lift: number;
   spacing: number;
+  /** Size chosen by the user for a selection. */
+  runSize: number;
   seed: number;
   index: number;
   bold: boolean;
   style: number;
+}
+
+/** Size, angle and offsets of a planned letter for a writer this tired (1 = fresh). */
+function lookOf(plan: GlyphPlan, tired: number): { size: number; rotation: number; slant: number; lift: number; spacing: number } {
+  return {
+    size: Math.max(0.25, Math.min(3, 1 + plan.sizeDev * tired)) * plan.runSize,
+    rotation: plan.rotation * tired,
+    slant: Math.tan(Math.max(-75, Math.min(75, plan.slantBase + plan.slantDev * tired)) * DEG),
+    lift: plan.lift * tired,
+    spacing: Math.max(-0.9, plan.spacing * tired),
+  };
 }
 
 interface WordToken {
@@ -226,11 +248,13 @@ function planGlyphs(
       variantIndex: final,
       width: Math.max(0.05, bounds.maxX - bounds.minX),
       offsetX: -bounds.minX,
-      size: Math.max(0.25, Math.min(3, 1 + z[0] * 0.09 * nat.sizeVariation)) * runSize,
+      sizeDev: z[0] * 0.09 * nat.sizeVariation,
       rotation: z[1] * 4 * DEG * nat.rotation,
-      slant: Math.tan(Math.max(-75, Math.min(75, nat.slantDegrees + italic + z[2] * 7 * nat.slantVariation)) * DEG),
+      slantBase: nat.slantDegrees + italic,
+      slantDev: z[2] * 7 * nat.slantVariation,
       lift: z[3] * 0.07 * nat.baselineWobble,
-      spacing: Math.max(-0.9, z[4] * 0.45 * nat.spacingVariation),
+      spacing: z[4] * 0.45 * nat.spacingVariation,
+      runSize,
       seed: deriveSeed(seed, "ink", id),
       index,
       bold: Boolean(mark & BOLD),
@@ -279,6 +303,8 @@ interface LineState {
   firstGap: number;
   stops: number[];
   baselineMm: number;
+  /** How tired the writer is on this line (1 = fresh): multiplies the imperfections. */
+  tired: number;
   startXMm: number;
   slope: number;
   wobbleAmpMm: number;
@@ -353,11 +379,19 @@ export function layoutText(
   const marginLimit = 5 * Math.max(1, nat.marginDrift);
   // Each line's quirks come from the first thing written on it, so adding a
   // line higher up does not change every line below.
+  /** Tiredness grows smoothly down each page and from page to page (it stops growing after a few pages). */
+  const tiredAt = (pageIndex: number, baselineMm: number): number => {
+    const down = Math.max(0, Math.min(1, (baselineMm - firstBaselineMm) / Math.max(1, bottomMm - firstBaselineMm)));
+    return 1 + (nat.fatigue ?? 0) * Math.min(2.5, 0.8 * (pageIndex + down));
+  };
   const makeLine = (index: number, pageIndex: number, baselineMm: number, key: number | string, paragraph: number): LineState => {
     const rng = createRng(deriveSeed(seed, "line", key));
-    marginWalk = Math.max(-marginLimit, Math.min(marginLimit, marginWalk * 0.8 + clampedGauss(rng) * 1.3 * nat.marginDrift));
+    const tired = tiredAt(pageIndex, baselineMm);
+    const limit = marginLimit * Math.min(1.6, tired);
+    marginWalk = Math.max(-limit, Math.min(limit, marginWalk * 0.8 + clampedGauss(rng) * 1.3 * nat.marginDrift * tired));
     // People copy the angle of the line above, so the drift is correlated.
-    const drift = Math.max(-maxDrift, Math.min(maxDrift, previousDrift * 0.6 + Math.tan(clampedGauss(rng) * 0.55 * DEG * nat.lineDrift)));
+    const most = maxDrift * Math.min(1.6, tired);
+    const drift = Math.max(-most, Math.min(most, previousDrift * 0.6 + Math.tan(clampedGauss(rng) * 0.55 * DEG * nat.lineDrift * tired)));
     previousDrift = drift;
     const format = paragraphOf(paragraph);
     return {
@@ -370,9 +404,10 @@ export function layoutText(
       firstGap: missingBoxes.length,
       stops: [],
       baselineMm,
+      tired,
       startXMm: page.marginLeftMm + marginWalk,
       slope: tendency + drift,
-      wobbleAmpMm: nat.lineDrift * 0.3 * rng.next(),
+      wobbleAmpMm: nat.lineDrift * 0.3 * rng.next() * tired,
       wobblePeriodMm: 60 + rng.next() * 80,
       wobblePhase: rng.next() * Math.PI * 2,
     };
@@ -394,7 +429,7 @@ export function layoutText(
    * written over or rubbed out send the pen back to where they began, so what
    * follows is written on top of them.
    */
-  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], indices: number[], startX: number, line: LineState) => {
+  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], indices: number[], startX: number, line: LineState, plain = false) => {
     const xh = baseXh * line.scale;
     const placed: PlacedGlyph[] = [];
     const gaps: MissingBox[] = [];
@@ -403,7 +438,7 @@ export function layoutText(
     let underFrom: number | null = null;
     let reach = startX;
     plans.forEach((plan, i) => {
-      const under = isUnder(marks[indices[i]] ?? 0);
+      const under = !plain && isUnder(marks[indices[i]] ?? 0);
       if (under && underFrom === null) underFrom = x;
       if (!under && underFrom !== null) {
         reach = Math.max(reach, x);
@@ -416,26 +451,27 @@ export function layoutText(
         x += MISSING_GAP * xh + page.letterSpacing * xh;
         return;
       }
-      const scale = plan.size * shrinkAt(x) * line.scale;
+      const look = lookOf(plan, line.tired);
+      const scale = look.size * shrinkAt(x) * line.scale;
       const widthMm = plan.width * baseXh * scale;
       placed.push({
         char: plan.char,
         variantIndex: plan.variantIndex,
         page: line.page,
         xMm: x,
-        yMm: baselineAt(line, x) - plan.lift * xh,
+        yMm: baselineAt(line, x) - look.lift * xh,
         scale,
-        rotation: plan.rotation,
-        shear: plan.slant,
+        rotation: look.rotation,
+        shear: look.slant,
         offsetX: plan.offsetX,
         seed: plan.seed,
         index: plan.index,
         widthMm,
         bold: plan.bold,
         style: plan.style,
-        erased: correctionOf(marks[plan.index] ?? 0) === "erase",
+        erased: !plain && correctionOf(marks[plan.index] ?? 0) === "erase",
       });
-      x += widthMm + page.letterSpacing * baseXh * scale * (1 + plan.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
+      x += widthMm + page.letterSpacing * baseXh * scale * (1 + look.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
     });
     reach = Math.max(reach, x);
     // Ending on letters to be written over: the next word goes on top of them.
@@ -513,22 +549,31 @@ export function layoutText(
     lineHasWords = true;
   };
 
-  /** Insertion carets (^) for words added above the line. */
-  const insertCarets: Decoration[] = [];
-  const isAbove = (index: number) => correctionOf(marks[index] ?? 0) === "above";
-  const aboveWord = (token: Token) => token.kind === "word" && token.indices.every(isAbove);
+  type Between = "above" | "below";
+  const betweenAt = (index: number): Between | null => {
+    const kind = correctionOf(marks[index] ?? 0);
+    return kind === "above" || kind === "below" ? kind : null;
+  };
+  const betweenWord = (token: Token): Between | null => {
+    if (token.kind !== "word") return null;
+    const kind = betweenAt(token.indices[0]);
+    return kind && token.indices.every((i) => betweenAt(i) === kind) ? kind : null;
+  };
   /** After letters to be written over, the space that follows does not move the pen. */
   let writingOver = false;
   /** Where the last space started: an insertion goes in the middle of the gap. */
   let gapStart: number | null = null;
 
   /**
-   * Words added above the line (with a caret ^ where they go): smaller, in the
-   * space between this line and the one above, centred on the insertion point.
+   * Words added between the lines, above or below this one: smaller, in the
+   * space between two lines, centred on where they go in the text.
    */
-  const placeAbove = (group: WordToken[], spaceIndices: number[]) => {
+  const placeBetween = (group: WordToken[], spaceIndices: number[], where: Between) => {
     const insertX = gapStart !== null ? (gapStart + cursor) / 2 : cursor;
-    const above: LineState = { ...line, scale: line.scale * 0.78, baselineMm: line.baselineMm - page.lineSpacingMm * 0.52 };
+    // Half way to the next line, on ruled paper too (where the lines are closer or wider apart).
+    const pitch = ruling ?? page.lineSpacingMm;
+    const shift = where === "above" ? -pitch * 0.52 : pitch * 0.5;
+    const above: LineState = { ...line, scale: line.scale * 0.78, baselineMm: line.baselineMm + shift };
     const lay = (startX: number) => {
       const results: ReturnType<typeof placeWord>[] = [];
       let x = startX;
@@ -557,21 +602,6 @@ export function layoutText(
       carets[index] = { page: line.page, line: line.index, xMm: x, yMm: baselineAt(above, x) };
       line.stops.push(index);
     });
-    const first = group[0];
-    const style = runStyleIndex(marks[first.indices[0]] ?? 0);
-    const xh = baseXh * line.scale;
-    insertCarets.push({
-      kind: "caret",
-      page: line.page,
-      x0: insertX - 0.35 * xh,
-      y0: baselineAt(line, insertX),
-      x1: insertX + 0.35 * xh,
-      y1: baselineAt(line, insertX),
-      xhMm: xh,
-      color: 0,
-      style,
-      seed: deriveSeed(seed, "caret", ids[first.indices[0]] ?? first.indices[0]),
-    });
   };
 
   outer: for (let t = 0; t < tokens.length; t++) {
@@ -594,16 +624,17 @@ export function layoutText(
       cursor += page.wordSpacing * baseXh * line.scale * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
       continue;
     }
-    if (aboveWord(token) && lineHasWords) {
-      // The whole run added above: its words and the spaces between them.
+    const where = betweenWord(token);
+    if (where && lineHasWords) {
+      // The whole run added above (or below): its words and the spaces between them.
       const group: WordToken[] = [token];
       const spaces: number[] = [];
-      while (t + 2 < tokens.length && tokens[t + 1].kind === "space" && isAbove((tokens[t + 1] as { index: number }).index) && aboveWord(tokens[t + 2])) {
+      while (t + 2 < tokens.length && tokens[t + 1].kind === "space" && betweenAt((tokens[t + 1] as { index: number }).index) === where && betweenWord(tokens[t + 2]) === where) {
         spaces.push((tokens[t + 1] as { index: number }).index);
         group.push(tokens[t + 2] as WordToken);
         t += 2;
       }
-      placeAbove(group, spaces);
+      placeBetween(group, spaces, where);
       // The gap it goes into stays a single gap: the space after it does not count again.
       if (gapStart !== null) writingOver = true;
       continue;
@@ -635,8 +666,118 @@ export function layoutText(
   finishLine();
   for (let i = 0; i < carets.length; i++) if (!carets[i]) carets[i] = carets[i + 1] ?? carets[i - 1];
 
-  const decorations = [...decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed), ...insertCarets];
-  return { glyphs, missing, missingBoxes, decorations, carets, pageCount: pageIndex + 1, overflow, lineCount: lineIndex + 1 };
+  const decorations = decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed);
+  // What was written before the correction tape went over it, under the first
+  // piece of tape of each run (a run that goes on to the next line is one correction).
+  const hidden: PlacedGlyph[] = [];
+  for (const d of decorations) {
+    if (d.kind !== "tipex" || !underTextOf(text, marks, runStyles, d)) continue;
+    hidden.push(...placeUnderTape(underTextOf(text, marks, runStyles, d), d, marks[d.start] ?? 0, hand, page, nat, seed, runStyles).glyphs);
+  }
+  return { glyphs, missing, missingBoxes, decorations, hidden, carets, pageCount: pageIndex + 1, overflow, lineCount: lineIndex + 1 };
+}
+
+/** Correction tape is the same width whatever the size of the letters, in millimetres. */
+export const TAPE_WIDTH_MM = 5;
+
+/** Where a piece of correction tape starts and ends along its line, in millimetres. */
+export function tapeSpan(d: Decoration): { from: number; to: number } {
+  const rng = createRng(deriveSeed(d.seed, "tape-span"));
+  return { from: d.x0 - (0.7 + 1.1 * rng.next()), to: d.x1 + (0.8 + 1.4 * rng.next()) };
+}
+
+/** Room under a piece of tape for what it hides, in millimetres along the line. */
+export function tapeRoom(d: Decoration): { from: number; to: number } {
+  const span = tapeSpan(d);
+  return { from: span.from + 0.4, to: span.to - 0.4 };
+}
+
+/**
+ * The text hidden under a piece of correction tape, or "" when there is none
+ * or the piece only continues a run that started on the line before.
+ */
+export function underTextOf(text: string, marks: number[], runStyles: RunStyle[], d: Decoration): string {
+  const under = runStyles[runStyleIndex(marks[d.start] ?? 0) - 1]?.tipexUnder ?? "";
+  if (!under) return "";
+  let k = d.start - 1;
+  while (k >= 0 && text[k] !== "\n" && /\s/.test(text[k])) k--;
+  if (k >= 0 && text[k] !== "\n" && correctionOf(marks[k] ?? 0) === "tipex") return "";
+  return under;
+}
+
+/**
+ * Places text under a piece of correction tape, on the tape's line and in the
+ * same hand and size as the words on it. Letters past the end of the tape are
+ * left out. Also says how long the whole text is and how much room there is.
+ */
+export function placeUnderTape(
+  rawText: string,
+  d: Decoration,
+  mark: number,
+  hand: Hand,
+  page: PageSettings,
+  nat: Naturalness,
+  seed: number,
+  runStyles: RunStyle[],
+): { glyphs: PlacedGlyph[]; widthMm: number; roomMm: number } {
+  const text = rawText.replace(/\s+/g, " ").trim();
+  const room = tapeRoom(d);
+  const roomMm = Math.max(0, room.to - room.from);
+  if (!text) return { glyphs: [], widthMm: 0, roomMm };
+  const style = runStyleIndex(mark);
+  const charMark = withRunStyle(mark & (BOLD | ITALIC), style);
+  const ids = Array.from({ length: text.length }, (_, k) => deriveSeed(d.seed, "under", k));
+  const { tokens } = planGlyphs(text, ids, new Array(text.length).fill(charMark), runStyles, hand, nat, seed);
+  const baseXh = page.xHeightMm;
+  const runSize = style > 0 ? runStyles[style - 1]?.size ?? 1 : 1;
+  const lineScale = d.xhMm / baseXh / runSize;
+  const xh = baseXh * lineScale;
+  const slope = (d.y1 - d.y0) / Math.max(0.01, d.x1 - d.x0);
+  const baselineAt = (x: number) => d.y0 + slope * (x - d.x0);
+  const glyphs: PlacedGlyph[] = [];
+  let x = room.from;
+  let inkEnd = room.from;
+  let fits = true;
+  for (const token of tokens) {
+    if (token.kind === "space") {
+      const rng = createRng(token.seed);
+      x += page.wordSpacing * xh * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
+      continue;
+    }
+    if (token.kind !== "word") continue;
+    token.plans.forEach((plan) => {
+      if (!plan) {
+        x += MISSING_GAP * xh + page.letterSpacing * xh;
+        inkEnd = x;
+        return;
+      }
+      const look = lookOf(plan, 1);
+      const scale = look.size * lineScale;
+      const widthMm = plan.width * baseXh * scale;
+      inkEnd = x + widthMm;
+      if (inkEnd > room.to) fits = false;
+      if (fits) {
+        glyphs.push({
+          char: plan.char,
+          variantIndex: plan.variantIndex,
+          page: d.page,
+          xMm: x,
+          yMm: baselineAt(x) - look.lift * xh,
+          scale,
+          rotation: look.rotation,
+          shear: look.slant,
+          offsetX: plan.offsetX,
+          seed: plan.seed,
+          index: d.start,
+          widthMm,
+          bold: plan.bold,
+          style: plan.style,
+        });
+      }
+      x += widthMm + page.letterSpacing * baseXh * scale * (1 + look.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
+    });
+  }
+  return { glyphs, widthMm: inkEnd - room.from, roomMm };
 }
 
 /**
@@ -729,6 +870,8 @@ function decorate(
           color: highlightColorIndex(marks[a] ?? 0),
           style: styleAt(a),
           seed: deriveSeed(seed, kind, ids[a] ?? a),
+          start: a,
+          end: b,
         });
       }
       i = j + 1;

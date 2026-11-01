@@ -5,7 +5,7 @@ import { bridge, loadPreference, savePreference } from "../bridge";
 import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids";
 import type { ChiroDocument, PenTuning, SheetSettings } from "../engine/document";
 import { charactersNeeded, type Hand } from "../engine/hand";
-import { defaultCharIds, layoutText, normaliseText, type LayoutFormat, type LayoutResult } from "../engine/layout";
+import { defaultCharIds, layoutText, normaliseText, placeUnderTape, type LayoutFormat, type LayoutResult } from "../engine/layout";
 import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, penById } from "../engine/pens";
 import { freshSeed, hashString } from "../engine/random";
 import { renderPage } from "../engine/render";
@@ -67,6 +67,7 @@ import { onViewOptions, setViewOption, viewOptions } from "../view-options";
 import { button, h, percent, searchKey, slider, toast } from "./dom";
 import { createPageEditor } from "./page-editor";
 import { createRuler } from "./ruler";
+import { openTipexDialog } from "./tipex-dialog";
 import { createToolbar } from "./toolbar";
 import { createZoomControl } from "./zoom";
 
@@ -140,6 +141,8 @@ const USUAL: Record<string, UsualRange> = {
   inkSkips: { usual: [0, 0.5], caution: 0.2 },
   highlighterSmear: { usual: [0, 0.8], caution: 0.25 },
   handSmudges: { usual: [0, 0.6], caution: 0.25 },
+  fatigue: { usual: [0, 1], caution: 0.3 },
+  inkBlobs: { usual: [0, 0.6], caution: 0.3 },
   naturalnessAmount: { usual: [0.4, 1.5], caution: 0.3 },
   paperSpacing: { usual: [6, 10], caution: 0.8 },
 };
@@ -161,6 +164,8 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "inkSkips",
   "highlighterSmear",
   "handSmudges",
+  "inkBlobs",
+  "fatigue",
 ];
 
 /** What the document controller needs from the sheet. */
@@ -243,9 +248,6 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
   let highlightColor = loadPreference("sheet.highlightColor", 0);
-  /** The correction the main button makes (the last one chosen in its menu). */
-  let lastCorrection = loadPreference<Correction>("sheet.lastCorrection", "tipex");
-  if (!CORRECTIONS.includes(lastCorrection)) lastCorrection = "tipex";
   /** Highlight word by word (the hand lifted at every space), remembered for the next time. */
   let highlightWords = loadPreference("sheet.highlightWords", false);
   /** Round ends (a worn or bullet tip) instead of the chisel's square ones. */
@@ -461,17 +463,80 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   /** Corrects the selection (or what is typed next) in one of the hand-made ways; null removes it. */
   function correct(kind: Correction | null): void {
-    if (kind) {
-      lastCorrection = kind;
-      savePreference("sheet.lastCorrection", kind);
-    }
     const { start, end } = editor.selection();
     if (start === end) {
       pendingMarks = withCorrection(marksAt(start), kind);
       updateToolbar();
       return;
     }
-    changeFormatting(() => (marks = marks.map((m, i) => (i >= start && i < end ? withCorrection(m, kind) : m))));
+    changeFormatting(() => {
+      // New tape has nothing under it yet; letters that stop being on tape lose what was under it.
+      const fresh = (i: number) => kind !== "tipex" || correctionOf(marks[i] ?? 0) !== "tipex";
+      let next = marks.map((m, i) => (i >= start && i < end ? withCorrection(m, kind) : m));
+      let styles = runStyles;
+      for (let i = start; i < end; ) {
+        if (!fresh(i) || !styles[runStyleIndex(next[i] ?? 0) - 1]?.tipexUnder) {
+          i++;
+          continue;
+        }
+        let j = i + 1;
+        while (j < end && fresh(j)) j++;
+        ({ marks: next, styles } = applyRunStyle(next, styles, i, j, { tipexUnder: undefined }));
+        i = j;
+      }
+      marks = next;
+      runStyles = styles;
+    });
+  }
+
+  /**
+   * The piece of correction tape the selection (or the cursor) is on: the
+   * whole run of letters on tape, and where its first word starts.
+   */
+  function tipexRun(): { start: number; end: number; first: number } | null {
+    const { start, end } = editor.selection();
+    const onTape = (i: number) => i >= 0 && i < lastText.length && lastText[i] !== "\n" && correctionOf(marks[i] ?? 0) === "tipex";
+    let found = -1;
+    for (let i = start; i < end; i++) {
+      if (onTape(i)) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0 && start === end && onTape(start - 1) && onTape(start)) found = start;
+    if (found < 0) return null;
+    let a = found;
+    while (onTape(a - 1)) a--;
+    let b = found + 1;
+    while (onTape(b)) b++;
+    let first = a;
+    while (first < b && /\s/.test(lastText[first])) first++;
+    return first < b ? { start: a, end: b, first } : null;
+  }
+
+  /** "Escribir debajo del Típex": what was written before the tape, as long as the tape allows. */
+  function writeUnderTipex(): void {
+    const run = tipexRun();
+    if (!run) {
+      // Nothing on tape is selected: the menu says why the option is off.
+      toolbar.openCorrections();
+      return;
+    }
+    relayout();
+    const tape = layout?.decorations.find((d) => d.kind === "tipex" && d.start === run.first);
+    if (!tape) return;
+    editor.setSelection(run.start, run.end);
+    const style = runStyleIndex(marks[run.first] ?? 0);
+    const hand = store.get().hand;
+    openTipexDialog({
+      initial: (style > 0 ? runStyles[style - 1]?.tipexUnder : undefined) ?? "",
+      measure: (text) => placeUnderTape(text, tape, marks[run.first] ?? 0, hand, page, effectiveNaturalness(), seed, runStyles),
+      onSave: (text) => {
+        editor.setSelection(run.start, run.end);
+        changeFormatting(() => ({ marks, styles: runStyles } = applyRunStyle(marks, runStyles, run.start, run.end, { tipexUnder: text || undefined })));
+      },
+      onClose: () => editor.focus(),
+    });
   }
 
   /** The correction of the selection's first letter (or of what will be typed). */
@@ -540,8 +605,11 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       const on = start === end ? !(marksAt(start) & HIGHLIGHT) : !rangeHasMark(lastText, marks, start, end, HIGHLIGHT);
       if (on) highlightOut({});
       else toggleFlag(HIGHLIGHT, highlightColor, false);
-    } else if (command === "format:correct") correct(selectionCorrection() ? null : lastCorrection);
-    else if (kind === "correct") correct((CORRECTIONS as readonly string[]).includes(value) ? (value as Correction) : null);
+    } else if (command === "tipex-under") {
+      // The dialog keeps the focus (the page gets it back when it closes).
+      writeUnderTipex();
+      return true;
+    } else if (kind === "correct") correct((CORRECTIONS as readonly string[]).includes(value) ? (value as Correction) : null);
     else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
     else if (kind === "highlight-ends") highlightOut({ round: value === "round" });
     else if (command === "format:scribble") {
@@ -651,6 +719,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       highlightWords: has(HIGHLIGHT) ? Boolean(selected.highlightWords) : highlightWords,
       highlightRound: has(HIGHLIGHT) ? Boolean(selected.highlightRound) : highlightRound,
       correction: selectionCorrection(),
+      tipexSelected: tipexRun() !== null,
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
@@ -708,6 +777,14 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   for (const preset of PRESETS) presetSelect.append(h("option", { value: preset.id }, preset.label));
   presetSelect.append(h("option", { value: "custom" }, es.sheet.custom));
   presetSelect.value = presetId;
+  /** What the chosen preset is like, when its name does not say it all. */
+  const presetInfo = h("p", { class: "muted preset-info" });
+  const showPresetInfo = () => {
+    const description = presetSelect.value === "custom" ? undefined : presetById(presetSelect.value).description;
+    presetInfo.textContent = description ?? "";
+    presetInfo.hidden = !description;
+  };
+  showPresetInfo();
 
   const naturalSliders = new Map<keyof Naturalness, (value: number) => void>();
   const naturalControls = NATURAL_KEYS.map((key) => {
@@ -727,6 +804,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         naturalness = { ...naturalness, [key]: value };
         presetId = "custom";
         presetSelect.value = presetId;
+        showPresetInfo();
         persist();
         relayout();
         scheduleRender();
@@ -743,6 +821,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   presetSelect.addEventListener("change", () => {
     presetId = presetSelect.value;
+    showPresetInfo();
     if (presetId !== "custom") setNaturalness(presetById(presetId).values);
     persist();
     relayout();
@@ -760,6 +839,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     setNaturalness(randomNaturalness(seed));
     presetId = "custom";
     presetSelect.value = presetId;
+    showPresetInfo();
     persist();
     relayout();
     scheduleRender(0);
@@ -901,6 +981,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   const resetNaturalness = () => {
     presetId = DEFAULT_PRESET_ID;
     presetSelect.value = presetId;
+    showPresetInfo();
     setNaturalness(presetById(presetId).values);
     naturalnessAmount = 1;
     amountSlider.set(1);
@@ -990,7 +1071,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       "naturalness",
       es.sheet.naturalness,
       resetNaturalness,
-      field(es.sheet.preset, presetSelect, h("div", { class: "button-row" }, randomButton), h("p", { class: "muted" }, es.sheet.randomHelp)),
+      field(es.sheet.preset, presetSelect, presetInfo, h("div", { class: "button-row" }, randomButton), h("p", { class: "muted" }, es.sheet.randomHelp)),
       amountSlider.root,
       check(leftHand, es.sheet.leftHanded, es.sheet.leftHandedHelp),
       advanced,
@@ -1247,6 +1328,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         for (const [key, set] of pageSetters) set(page[key]);
         setNaturalness(doc.settings.naturalness);
         presetSelect.value = presetId;
+        showPresetInfo();
         versionLabel.textContent = es.sheet.version(seed);
         lastText = doc.text;
         charIds = doc.charIds.length === doc.text.length ? doc.charIds : defaultCharIds(doc.text);

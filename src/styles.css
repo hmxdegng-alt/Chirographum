@@ -878,44 +878,154 @@ textarea.text-input {
 .correct-menu {
   flex-direction: column;
   flex-wrap: nowrap;
-  gap: 2px;
-  width: 290px;
+  gap: 4px;
+  width: 316px;
 }
 
-.menu-item {
+/* A button that only opens its menu: the ▾ sits inside it. */
+.tool.menu-button {
+  gap: 1px;
+  padding: 0 4px 0 6px;
+}
+
+.menu-caret {
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+.correct-kinds {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.correct-kind {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid transparent;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 2px 3px;
+  border: 1px solid var(--control-border);
   border-radius: 6px;
-  background: transparent;
+  background: #ffffff;
   font: inherit;
-  text-align: left;
+  font-size: 11px;
   color: var(--text);
   cursor: pointer;
 }
 
-.menu-item:hover {
-  background: #eef0f4;
+.correct-kind:hover {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
 }
 
-.menu-item.active {
+.correct-kind.active {
   border-color: var(--accent);
   background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
-.menu-item-title {
-  font-size: 13px;
+.correct-preview {
+  width: 54px;
+  height: 32px;
+}
+
+.correct-hint {
+  min-height: 34px;
+  margin: 2px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.correct-hint strong {
+  color: var(--text);
   font-weight: 600;
 }
 
-.menu-item-help {
+.menu-rule {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
+}
+
+.menu-text:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+  cursor: default;
+  background: transparent;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 26, 40, 0.32);
+}
+
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 18px 20px 16px;
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: 0 18px 50px rgba(20, 30, 50, 0.3);
+}
+
+.dialog h2 {
+  margin: 0 0 6px;
+  font-size: 17px;
+}
+
+.dialog p.muted {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.tipex-meter {
+  display: block;
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 3px;
+  background: #e7eaf0;
+  overflow: hidden;
+}
+
+.tipex-meter-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.12s ease;
+}
+
+.tipex-meter.near .tipex-meter-fill {
+  background: #d4a514;
+}
+
+.tipex-meter.full .tipex-meter-fill {
+  background: #c8372d;
+}
+
+.tipex-status {
+  margin: 6px 0 0;
   font-size: 12px;
   color: var(--muted);
-  line-height: 1.35;
+}
+
+.tipex-status.full {
+  color: #b3261e;
 }
 
 .menu-check {
@@ -1005,8 +1115,8 @@ textarea.text-input {
 }
 
 .tool .scribble-icon {
-  width: 26px;
-  height: 16px;
+  width: 24px;
+  height: 15px;
 }
 
 .tool .scribble-icon path {
