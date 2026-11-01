@@ -306,6 +306,11 @@ textarea.text-input {
   height: 100%;
 }
 
+.button-row[hidden],
+.muted[hidden] {
+  display: none;
+}
+
 .draw-view[hidden],
 .sheet-view[hidden] {
   display: none;
@@ -390,8 +395,12 @@ textarea.text-input {
 }
 
 .letter-chip.done {
-  background: #eef6ef;
-  border-color: #cfe5d2;
+  background: #d3f0d6;
+  border-color: #a6dbad;
+}
+
+.letter-chip.done .letter-count {
+  color: #2f6e3a;
 }
 
 .letter-chip.selected {
@@ -413,6 +422,59 @@ textarea.text-input {
 .progress-text {
   font-weight: 600;
   margin: 12px 0 2px;
+}
+
+.progress-text.finished {
+  color: #2f6e3a;
+}
+
+.drawing-area {
+  position: relative;
+  width: 100%;
+}
+
+.canvas-frame.dimmed {
+  visibility: hidden;
+}
+
+.done-panel {
+  position: absolute;
+  inset: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+}
+
+.done-panel[hidden] {
+  display: none;
+}
+
+.done-panel h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+}
+
+.done-panel .muted {
+  max-width: 460px;
+  font-size: 14px;
+}
+
+.done-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #d3f0d6;
+  color: #2f6e3a;
+  font-size: 28px;
+  line-height: 52px;
+  font-weight: 700;
 }
 
 .variants-list {
@@ -510,6 +572,21 @@ textarea.text-input {
 
 .preview-hint {
   margin: 0 0 8px;
+}
+
+.toggle-chip {
+  margin: 0 0 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #ffffff;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-chip:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .pages {

@@ -6,6 +6,7 @@ import { initialState, Store } from "./store";
 import { h } from "./ui/dom";
 import { createDrawView } from "./ui/draw-view";
 import { createSheetView } from "./ui/sheet-view";
+import { connectViewMenu } from "./view-options";
 import "./styles.css";
 
 async function loadAutosavedHand(): Promise<Hand | null> {
@@ -18,6 +19,7 @@ async function loadAutosavedHand(): Promise<Hand | null> {
 }
 
 async function start(): Promise<void> {
+  connectViewMenu();
   const store = new Store(initialState(await loadAutosavedHand()));
   const drawView = createDrawView(store);
   const sheetView = createSheetView(store);

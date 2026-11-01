@@ -3,7 +3,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 // The only bridge between the page and the computer: saving and opening
-// hands, printing and exporting PDF. Nothing here touches the network.
+// hands, printing, exporting PDF and the "Ver" menu ticks. Nothing here
+// touches the network.
 contextBridge.exposeInMainWorld("chirographum", {
   autosaveHand: (json) => ipcRenderer.invoke("hand:autosave", json),
   loadAutosavedHand: () => ipcRenderer.invoke("hand:loadAutosave"),
@@ -11,4 +12,9 @@ contextBridge.exposeInMainWorld("chirographum", {
   openHand: () => ipcRenderer.invoke("hand:open"),
   printPage: () => ipcRenderer.invoke("page:print"),
   exportPdf: () => ipcRenderer.invoke("page:exportPdf"),
+  // Ticks of the "Ver" menu.
+  setViewOption: (name, value) => ipcRenderer.send("view:set", String(name), Boolean(value)),
+  onViewOption: (callback) => {
+    ipcRenderer.on("view:changed", (_event, name, value) => callback(String(name), Boolean(value)));
+  },
 });

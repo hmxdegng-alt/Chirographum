@@ -2,14 +2,16 @@
 // pen and the imperfections, and prints or exports a PDF at true size.
 
 import { bridge, loadPreference, savePreference } from "../bridge";
+import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids";
 import { charactersNeeded, type Hand } from "../engine/hand";
-import { layoutText, type LayoutResult } from "../engine/layout";
+import { defaultCharIds, layoutText, normaliseText, type LayoutResult } from "../engine/layout";
 import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, PENS, penById } from "../engine/pens";
 import { freshSeed, hashString } from "../engine/random";
 import { renderPage } from "../engine/render";
 import { A4, DEFAULT_PRESET_ID, PRESETS, presetById, randomNaturalness, type Naturalness, type PageSettings } from "../engine/settings";
 import { es } from "../i18n/es";
 import type { Store } from "../store";
+import { onViewOptions, setViewOption, viewOptions } from "../view-options";
 import { createColorPopover } from "./color-picker";
 import { button, h, percent, slider, toast } from "./dom";
 import { createPageEditor } from "./page-editor";
@@ -29,11 +31,17 @@ const MAX_PREVIEW_PIXELS = 24_000_000;
 const ZOOM_RENDER_DELAY = 140;
 /** Wait after the last key before redrawing the handwriting. */
 const TYPING_RENDER_DELAY = 40;
+/** Earlier versions of the text and their letter identities, so undo brings back the same look. */
+const HISTORY_SIZE = 200;
+const HISTORY_MAX_LENGTH = 200_000;
 
 const decimal = (value: number, digits = 1) => value.toFixed(digits).replace(".", ",");
 const mmFormat = (value: number) => `${decimal(value)} ${es.sheet.mm}`;
 const slopeFormat = (value: number) =>
   Math.abs(value) < 0.05 ? es.sheet.slopeFlat : value > 0 ? es.sheet.slopeUp(decimal(value)) : es.sheet.slopeDown(decimal(-value));
+
+/** Imperfection sliders go up to 300 %: 100 % is a lot already, beyond is for whoever wants it. */
+const NATURAL_MAX = 3;
 
 const NATURAL_KEYS: (keyof Naturalness)[] = [
   "sizeVariation",
@@ -59,6 +67,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   if (presetId === "random") presetId = "custom"; // v0.0.2 had "Aleatorio" in the list
   let naturalness: Naturalness = { ...presetById(DEFAULT_PRESET_ID).values, ...loadPreference<Partial<Naturalness>>("sheet.naturalness", {}) };
   let seed = loadPreference("sheet.seed", freshSeed());
+  /** The user's adjustments to the instrument: thickness and amount of ink. */
+  let penTuning = { widthScale: 1, inkStrength: 1, ...loadPreference<Partial<{ widthScale: number; inkStrength: number }>>("sheet.penTuning", {}) };
   let renderTimer: number | undefined;
   let layout: LayoutResult | null = null;
   /** What each page canvas shows, to redraw only the pages that changed. */
@@ -72,17 +82,52 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     savePreference("sheet.preset", presetId);
     savePreference("sheet.naturalness", naturalness);
     savePreference("sheet.seed", seed);
+    savePreference("sheet.penTuning", penTuning);
   };
 
   const currentColor = () => (penById(penId).kind === "pencil" ? PENCIL_COLOR : inkColor);
 
+  // ----- Text and the identity of every letter -----
+  const initialText = normaliseText(loadPreference("sheet.text", store.get().phrase));
+  let lastText = initialText;
+  let charIds = loadPreference<number[]>("sheet.textIds", []);
+  if (charIds.length !== initialText.length) charIds = defaultCharIds(initialText);
+  const history = new Map<string, number[]>([[initialText, charIds]]);
+
+  const remember = (text: string, ids: number[]) => {
+    if (text.length > HISTORY_MAX_LENGTH) return;
+    history.delete(text);
+    history.set(text, ids);
+    if (history.size > HISTORY_SIZE) history.delete(history.keys().next().value!);
+  };
+
+  /** New identities after an edit: unchanged letters keep theirs, so they keep their look. */
+  function idsAfterEdit(text: string): number[] {
+    if (viewOptions().typingAnimation) {
+      // Optional cartoon effect: the edited word gets new drawings on every key.
+      const ids = updateCharIds(lastText, charIds, text, randomCharId);
+      const { start, end } = editedWordRange(lastText, text);
+      for (let i = start; i < end; i++) ids[i] = randomCharId();
+      return ids;
+    }
+    // Undo and redo bring back an earlier text: give it back its letters too.
+    return history.get(text) ?? updateCharIds(lastText, charIds, text, randomCharId);
+  }
+
   // ----- Pages -----
   let textSaveTimer: number | undefined;
   const editor = createPageEditor({
-    initialText: loadPreference("sheet.text", store.get().phrase),
-    onInput: (text) => {
+    initialText,
+    onInput: (raw) => {
+      const text = normaliseText(raw);
+      charIds = idsAfterEdit(text);
+      lastText = text;
+      remember(text, charIds);
       window.clearTimeout(textSaveTimer);
-      textSaveTimer = window.setTimeout(() => savePreference("sheet.text", text), 300);
+      textSaveTimer = window.setTimeout(() => {
+        savePreference("sheet.text", text);
+        savePreference("sheet.textIds", charIds);
+      }, 300);
       relayout();
       scheduleRender(TYPING_RENDER_DELAY);
     },
@@ -107,12 +152,20 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       scheduleRender(ZOOM_RENDER_DELAY);
     },
   });
+  const printedToggle = h("input", { type: "checkbox", checked: viewOptions().printedLook });
+  printedToggle.addEventListener("change", () => setViewOption("printedLook", printedToggle.checked));
+  const printedLabel = h("label", { class: "check toggle-chip", title: es.sheet.printedLookHelp }, printedToggle, es.sheet.printedLook);
+  onViewOptions((options) => {
+    printedToggle.checked = options.printedLook;
+    scheduleRender(0);
+  });
   const previewArea = h(
     "section",
     { class: "sheet-preview" },
-    h("div", { class: "preview-bar" }, zoom.bar, h("span", { class: "muted preview-hint" }, es.sheet.editorHint)),
+    h("div", { class: "preview-bar" }, zoom.bar, printedLabel, h("span", { class: "muted preview-hint" }, es.sheet.editorHint)),
     previewScroll,
   );
+  previewScroll.addEventListener("scroll", () => scheduleRender(60), { passive: true });
 
   // ----- Controls -----
   const warnings = h("div", { class: "warnings" });
@@ -169,14 +222,32 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     customColor.setDisabled(disabled);
   }
 
-  const pageSlider = (label: string, key: keyof PageSettings, min: number, max: number, step: number) =>
+  const tuningSlider = (label: string, key: keyof typeof penTuning, min: number, max: number) =>
+    slider({
+      label,
+      min,
+      max,
+      step: 0.01,
+      value: penTuning[key],
+      format: percent,
+      onInput: (value) => {
+        penTuning = { ...penTuning, [key]: value };
+        persist();
+        scheduleRender();
+      },
+    }).root;
+
+  /** Spacing is stored in x-heights; shown in millimetres at the current letter size. */
+  const spacingFormat = (value: number) => mmFormat(value * page.xHeightMm);
+
+  const pageSlider = (label: string, key: keyof PageSettings, min: number, max: number, step: number, format = mmFormat) =>
     slider({
       label,
       min,
       max,
       step,
       value: page[key],
-      format: mmFormat,
+      format,
       onInput: (value) => {
         page = { ...page, [key]: value };
         persist();
@@ -194,10 +265,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   const naturalControls = NATURAL_KEYS.map((key) => {
     const range =
       key === "slantDegrees"
-        ? { min: -15, max: 25, step: 1, format: (v: number) => `${Math.round(v)}${es.sheet.degrees}` }
+        ? { min: -45, max: 45, step: 1, format: (v: number) => `${Math.round(v)}${es.sheet.degrees}` }
         : key === "lineSlope"
-          ? { min: -3, max: 3, step: 0.1, format: slopeFormat }
-          : { min: 0, max: 1, step: 0.01, format: percent };
+          ? { min: -10, max: 10, step: 0.1, format: slopeFormat }
+          : { min: 0, max: NATURAL_MAX, step: 0.01, format: percent };
     const control = slider({
       label: es.sheet.sliders[key],
       ...range,
@@ -263,14 +334,18 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     penSelect,
     h("label", { class: "field-label" }, es.sheet.color),
     colorPicker,
+    tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
+    tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
     h("hr"),
-    pageSlider(es.sheet.size, "xHeightMm", 1.8, 5, 0.1),
-    pageSlider(es.sheet.lineSpacing, "lineSpacingMm", 5, 14, 0.5),
+    pageSlider(es.sheet.size, "xHeightMm", 1, 15, 0.1),
+    pageSlider(es.sheet.lineSpacing, "lineSpacingMm", 3, 40, 0.5),
+    pageSlider(es.sheet.letterSpacing, "letterSpacing", -0.3, 2, 0.01, spacingFormat),
+    pageSlider(es.sheet.wordSpacing, "wordSpacing", 0.2, 6, 0.05, spacingFormat),
     h("p", { class: "field-label" }, es.sheet.margins),
-    pageSlider(es.sheet.marginLeft, "marginLeftMm", 5, 50, 1),
-    pageSlider(es.sheet.marginRight, "marginRightMm", 5, 50, 1),
-    pageSlider(es.sheet.marginTop, "marginTopMm", 5, 50, 1),
-    pageSlider(es.sheet.marginBottom, "marginBottomMm", 5, 50, 1),
+    pageSlider(es.sheet.marginLeft, "marginLeftMm", 0, 100, 1),
+    pageSlider(es.sheet.marginRight, "marginRightMm", 0, 100, 1),
+    pageSlider(es.sheet.marginTop, "marginTopMm", 0, 100, 1),
+    pageSlider(es.sheet.marginBottom, "marginBottomMm", 0, 100, 1),
     h("hr"),
     h("h3", { class: "panel-subtitle" }, es.sheet.naturalness),
     h("label", { class: "field-label" }, es.sheet.preset),
@@ -297,7 +372,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         const state = store.get();
         const known = new Set([...charactersNeeded(state.phrase), ...state.extraChars]);
         const extra = [...state.extraChars, ...result.missing.filter((c) => !known.has(c))];
-        store.update({ extraChars: extra, tab: "draw" });
+        // Open "Tu letra" on the first letter that is missing, not on the first of the list.
+        store.update({ extraChars: extra, drawFocus: result.missing[0] ?? null, tab: "draw" });
       }, "ghost");
       items.push(h("div", { class: "warning" }, h("span", {}, es.sheet.missing(result.missing.join(" "))), add));
     }
@@ -308,14 +384,24 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Recomputes where everything goes (fast); the drawing follows later. */
   function relayout(): void {
     const hand = store.get().hand;
-    layout = layoutText(editor.text(), hand, page, naturalness, seed);
+    layout = layoutText(lastText, hand, page, naturalness, seed, charIds);
     renderWarnings(layout);
     editor.setLayout(layout, page);
     editor.setEmptyMessage(Object.keys(hand.glyphs).length > 0 ? null : es.sheet.emptyHand);
   }
 
   function pageSignature(result: LayoutResult, pageIndex: number, pxPerMm: number, hand: Hand): string {
-    const parts: (string | number)[] = [pxPerMm, penId, currentColor(), JSON.stringify(naturalness), seed, JSON.stringify(page), hand.updatedAt];
+    const parts: (string | number)[] = [
+      pxPerMm,
+      penId,
+      currentColor(),
+      JSON.stringify(naturalness),
+      seed,
+      JSON.stringify(page),
+      JSON.stringify(penTuning),
+      String(viewOptions().printedLook),
+      hand.updatedAt,
+    ];
     for (const g of result.glyphs) {
       if (g.page !== pageIndex) continue;
       parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed);
@@ -331,7 +417,12 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const pixels = page.widthMm * page.heightMm * backing * backing;
     if (pixels > MAX_PREVIEW_PIXELS) backing *= Math.sqrt(MAX_PREVIEW_PIXELS / pixels);
     const canvases = editor.pages();
+    // Only the pages on screen (and one screen around): long texts stay fast.
+    const view = previewScroll.getBoundingClientRect();
+    const margin = view.height;
     canvases.forEach((canvas, pageIndex) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.bottom < view.top - margin || rect.top > view.bottom + margin) return;
       const signature = pageSignature(result, pageIndex, backing, hand);
       if (drawnSignatures[pageIndex] === signature) return;
       renderPage(canvas, result, hand, page, {
@@ -342,6 +433,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         seed,
         pageIndex,
         background: "white",
+        widthScale: penTuning.widthScale,
+        inkStrength: penTuning.inkStrength,
+        printedLook: viewOptions().printedLook,
       });
       drawnSignatures[pageIndex] = signature;
     });
@@ -364,7 +458,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const printRoot = document.getElementById("print-root")!;
     const urls: string[] = [];
     try {
-      const result = layoutText(editor.text(), hand, page, naturalness, seed);
+      const result = layoutText(lastText, hand, page, naturalness, seed, charIds);
       const pxPerMm = PRINT_DPI / MM_PER_INCH;
       // Printing keeps the ink transparent (lossless PNG). The PDF gets the ink on
       // white as high-quality JPEG: PDF viewers open it much faster and the file is
@@ -383,6 +477,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
           seed,
           pageIndex,
           background: forPdf ? "white" : "transparent",
+          widthScale: penTuning.widthScale,
+          inkStrength: penTuning.inkStrength,
         });
         const sheet = h("div", { class: "print-page" });
         if (box) {

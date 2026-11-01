@@ -59,6 +59,8 @@ function slugify(name: string): string {
 
 export function createDrawView(store: Store): { root: HTMLElement; onShow: () => void } {
   let selectedChar: string | null = null;
+  /** The user chose to keep drawing extra variants after finishing every letter. */
+  let extraMode = false;
   /** Strokes of every ghost slot, in x-height units from that slot's origin. */
   let slotStrokes: Stroke[][] = [[]];
   /** Slot of every stroke, in drawing order (for undo). */
@@ -153,8 +155,23 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
   const ctx = canvas.getContext("2d")!;
   const currentLabel = h("p", { class: "current-label" });
   const canvasFrame = h("div", { class: "canvas-frame" }, canvas);
+  const doneExtraButton = button("", () => {
+    extraMode = true;
+    refresh();
+  });
+  const donePanel = h(
+    "div",
+    { class: "done-panel", hidden: true },
+    h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
+    h("h2", {}, es.draw.doneTitle),
+    h("p", { class: "muted" }, es.draw.doneText),
+    h("div", { class: "button-row centred" }, button(es.draw.goToSheet, () => store.update({ tab: "sheet" }), "primary"), doneExtraButton),
+  );
+  const drawingArea = h("div", { class: "drawing-area" }, canvasFrame, donePanel);
   const saveButton = button(es.draw.save, saveAll, "primary");
   const slotsHelp = h("p", { class: "muted centred-text" }, es.draw.slotsHelp);
+  const shortcutsText = h("p", { class: "muted centred-text" }, es.draw.shortcuts);
+  const drawButtons = h("div", { class: "button-row centred" }, button(es.draw.undo, undoStroke), button(es.draw.clear, clearDrawing), saveButton);
 
   const zoom = createZoomControl({
     scroller: canvasFrame,
@@ -209,10 +226,10 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     "section",
     { class: "draw-centre" },
     h("div", { class: "draw-head" }, currentLabel, zoom.bar),
-    canvasFrame,
-    h("div", { class: "button-row centred" }, button(es.draw.undo, undoStroke), button(es.draw.clear, clearDrawing), saveButton),
+    drawingArea,
+    drawButtons,
     slotsHelp,
-    h("p", { class: "muted centred-text" }, es.draw.shortcuts),
+    shortcutsText,
     h(
       "div",
       { class: "panel tools-panel" },
@@ -505,7 +522,12 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
   }
 
   function selectChar(char: string): void {
-    if (char === selectedChar) return;
+    // Picking a finished letter means the user wants extra variants of it.
+    if (countOf(char) >= store.get().variantsTarget) extraMode = true;
+    if (char === selectedChar) {
+      refresh();
+      return;
+    }
     selectedChar = char;
     slotStrokes = [];
     history = [];
@@ -594,6 +616,16 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
 
     const remaining = chars.reduce((sum, char) => sum + Math.max(0, target - countOf(char)), 0);
     progressText.textContent = chars.length === 0 ? es.draw.nothingToDraw : es.draw.progress(remaining);
+    progressText.classList.toggle("finished", chars.length > 0 && remaining === 0);
+    // Everything drawn: say so clearly instead of quietly offering extra variants.
+    if (remaining > 0) extraMode = false;
+    const finished = chars.length > 0 && remaining === 0 && !extraMode;
+    donePanel.hidden = !finished;
+    canvasFrame.classList.toggle("dimmed", finished);
+    drawButtons.hidden = finished;
+    shortcutsText.hidden = finished;
+    if (finished) slotsHelp.hidden = true;
+    doneExtraButton.textContent = es.draw.doneExtra(selectedChar ?? chars[0] ?? "");
     estimateText.textContent = remaining > 0 ? es.draw.estimate(Math.max(1, Math.ceil((remaining * SECONDS_PER_DRAWING) / 60))) : "";
 
     if (selectedChar) {
@@ -622,9 +654,17 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
       variantsTitle.textContent = "";
       variantsList.replaceChildren();
     }
+    if (finished) currentLabel.textContent = es.draw.doneLabel;
   }
 
   store.subscribe((state, previous) => {
+    if (state.drawFocus && state.drawFocus !== previous.drawFocus) {
+      const focus = state.drawFocus;
+      queueMicrotask(() => {
+        store.update({ drawFocus: null });
+        if (allCharacters().includes(focus)) selectChar(focus);
+      });
+    }
     if (state.hand !== previous.hand || state.phrase !== previous.phrase || state.extraChars !== previous.extraChars || state.variantsTarget !== previous.variantsTarget) {
       if (state.hand !== previous.hand && state.hand.createdAt !== previous.hand.createdAt) {
         slotStrokes = [];
@@ -641,6 +681,7 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
     if (event.key === "Enter") {
       event.preventDefault();
+      if (!donePanel.hidden) return;
       saveAll();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();

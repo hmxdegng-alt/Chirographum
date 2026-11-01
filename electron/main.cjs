@@ -76,6 +76,19 @@ function buildMenu() {
     {
       label: "Ver",
       submenu: [
+        {
+          id: "printedLook",
+          label: "Vista impresa",
+          type: "checkbox",
+          click: (item) => mainWindow?.webContents.send("view:changed", "printedLook", item.checked),
+        },
+        {
+          id: "typingAnimation",
+          label: "Animaciones mientras se escribe",
+          type: "checkbox",
+          click: (item) => mainWindow?.webContents.send("view:changed", "typingAnimation", item.checked),
+        },
+        { type: "separator" },
         { role: "resetZoom", label: "Tamaño real" },
         { role: "zoomIn", label: "Ampliar" },
         { role: "zoomOut", label: "Reducir" },
@@ -89,6 +102,11 @@ function buildMenu() {
 }
 
 function registerIpc() {
+  ipcMain.on("view:set", (_event, name, value) => {
+    const item = Menu.getApplicationMenu()?.getMenuItemById(String(name));
+    if (item) item.checked = Boolean(value);
+  });
+
   ipcMain.handle("hand:autosave", async (_event, json) => {
     const file = autosavePath();
     await fs.mkdir(path.dirname(file), { recursive: true });

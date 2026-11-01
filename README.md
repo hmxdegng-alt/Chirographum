@@ -9,9 +9,10 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 ## Estado: Fase 1 · versión de prueba
 
 - **Tu letra:** dibuja con el ratón, el trackpad o un lápiz digital cada letra varias veces. Cada letra aparece en varios huecos con una letra fantasma de guía; pulsa **Intro** para guardarlos todos. Con **Ctrl + rueda** haces zoom.
-- **Hoja:** haz clic en la hoja y escribe directamente, como en un procesador de textos: cursor, selección con el ratón, flechas, Inicio/Fin, copiar, pegar y deshacer. Cuando una página se llena, el texto sigue en la siguiente.
+- **Hoja:** haz clic en la hoja y escribe directamente, como en un procesador de textos: cursor, selección con el ratón, flechas, Inicio/Fin, copiar, pegar y deshacer. Cuando una página se llena, el texto sigue en la siguiente. Cada letra conserva su dibujo mientras escribes alrededor (si te gusta el efecto de «letras vivas», actívalo en *Ver › Animaciones mientras se escribe*).
 - **Instrumentos:** gel 0,7 y 0,5, bola, rotulador fino y mediano (la tinta se oscurece al cruzarse, como en la realidad), lápiz HB y portaminas. Ajustados con escaneos de escritura real.
 - **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, y un botón **Aleatorio**.
+- **Vista impresa** (botón sobre la hoja o menú *Ver*): imita cómo deja la tinta una impresora de chorro, calibrada con el escaneo de una hoja impresa.
 - **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp), todas las páginas.
 - **Guardar y abrir tu mano** como archivo `.chmano`.
 

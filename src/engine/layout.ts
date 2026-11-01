@@ -76,86 +76,100 @@ interface GlyphPlan {
 
 interface WordToken {
   kind: "word";
+  /** Identity of the first character: the key of a line that starts with this word. */
+  key: number;
   plans: (GlyphPlan | null)[];
   chars: string[];
   /** Index in the text of every character of the word. */
   indices: number[];
 }
-type Token = WordToken | { kind: "space"; index: number; seed: number } | { kind: "break"; index: number };
+type Token = WordToken | { kind: "space"; index: number; seed: number } | { kind: "break"; index: number; key: number };
 
 const DEG = Math.PI / 180;
 const EDGE_ZONE_MM = 35;
 const MISSING_GAP = 0.6;
 export const MAX_PAGES = 200;
+/** Two drawings of the same letter closer than this (in characters) must differ. */
+const REPEAT_WINDOW = 40;
+
+/**
+ * Identity of every character of a text: what keeps a letter looking the same
+ * while the user edits around it. Without stored identities (tests, old
+ * documents) each position gets one derived from its index.
+ */
+export function defaultCharIds(text: string): number[] {
+  return Array.from({ length: text.length }, (_, i) => hashString(`char:${i}`));
+}
 
 /**
  * Chooses variants and random offsets for every character, independent of
- * line breaks. Seeds come from the word itself (its text and how many times
- * it appeared before), so typing in one place does not rewrite the rest of
- * the page.
+ * line breaks. Everything about a letter comes from its own identity, so
+ * typing in one place does not rewrite the rest of the page.
  */
-function planGlyphs(text: string, hand: Hand, nat: Naturalness, seed: number): { tokens: Token[]; missing: string[] } {
+function planGlyphs(text: string, ids: number[], hand: Hand, nat: Naturalness, seed: number): { tokens: Token[]; missing: string[] } {
   const tokens: Token[] = [];
   const missing = new Set<string>();
-  const lastVariant = new Map<string, number>();
-  const occurrences = new Map<string, number>();
-  let chars: string[] = [];
-  let indices: number[] = [];
-  let lastWordKey = "start";
+  /** Last occurrence of each letter: where it was, its own first choice and its simple choice. */
+  const previous = new Map<string, { index: number; first: number; simple: number }>();
+  let word: { chars: string[]; indices: number[] } = { chars: [], indices: [] };
+
+  const planGlyph = (char: string, index: number): GlyphPlan | null => {
+    const variants = hand.glyphs[char] ?? [];
+    if (variants.length === 0) {
+      missing.add(char);
+      return null;
+    }
+    const id = ids[index] ?? hashString(`char:${index}`);
+    const rng = createRng(deriveSeed(seed, "glyph", id));
+    const z = [clampedGauss(rng), clampedGauss(rng), clampedGauss(rng), clampedGauss(rng), clampedGauss(rng)];
+    // Never the same drawing twice in a row: that is what gives a fake away.
+    // The choice only depends on this letter and the two before it (never on a
+    // whole chain), so an edit changes at most the next two of the same letter.
+    const n = variants.length;
+    const first = rng.int(n);
+    const candidates = Array.from({ length: n }, (_, k) => (first + k) % n);
+    const near = previous.get(char);
+    const before = near && index - near.index <= REPEAT_WINDOW ? near : null;
+    // "Simple" choice: just avoid the previous letter's own first choice.
+    const simple = before ? (candidates.find((v) => v !== before.first) ?? first) : first;
+    // Final choice: also avoid the drawing the previous letter most likely got.
+    const avoid = before ? (n > 2 ? [before.first, before.simple] : [before.simple]) : [];
+    const final = candidates.find((v) => !avoid.includes(v)) ?? first;
+    previous.set(char, { index, first, simple });
+    const bounds = variantBounds(variants[final]);
+    return {
+      char,
+      variantIndex: final,
+      width: Math.max(0.05, bounds.maxX - bounds.minX),
+      offsetX: -bounds.minX,
+      size: Math.max(0.25, Math.min(3, 1 + z[0] * 0.09 * nat.sizeVariation)),
+      rotation: z[1] * 4 * DEG * nat.rotation,
+      slant: Math.tan(Math.max(-75, Math.min(75, nat.slantDegrees + z[2] * 7 * nat.slantVariation)) * DEG),
+      lift: z[3] * 0.07 * nat.baselineWobble,
+      spacing: Math.max(-0.9, z[4] * 0.45 * nat.spacingVariation),
+      seed: deriveSeed(seed, "ink", id),
+    };
+  };
 
   const flushWord = () => {
-    if (chars.length === 0) return;
-    const wordText = chars.join("");
-    const occurrence = occurrences.get(wordText) ?? 0;
-    occurrences.set(wordText, occurrence + 1);
-    const wordSeed = deriveSeed(seed, "word", hashString(wordText), occurrence);
-    lastWordKey = `${hashString(wordText)}:${occurrence}`;
-    const plans = chars.map((char, position): GlyphPlan | null => {
-      const variants = hand.glyphs[char] ?? [];
-      if (variants.length === 0) {
-        missing.add(char);
-        return null;
-      }
-      const rng = createRng(deriveSeed(wordSeed, "glyph", position));
-      const z = [clampedGauss(rng), clampedGauss(rng), clampedGauss(rng), clampedGauss(rng), clampedGauss(rng)];
-      // Never the same drawing twice in a row: that is what gives a fake away.
-      const previous = lastVariant.get(char);
-      let variantIndex = rng.int(variants.length);
-      if (variants.length > 1 && variantIndex === previous) {
-        variantIndex = (variantIndex + 1 + rng.int(variants.length - 1)) % variants.length;
-      }
-      lastVariant.set(char, variantIndex);
-      const bounds = variantBounds(variants[variantIndex]);
-      return {
-        char,
-        variantIndex,
-        width: Math.max(0.05, bounds.maxX - bounds.minX),
-        offsetX: -bounds.minX,
-        size: Math.max(0.75, Math.min(1.3, 1 + z[0] * 0.09 * nat.sizeVariation)),
-        rotation: z[1] * 4 * DEG * nat.rotation,
-        slant: Math.tan((nat.slantDegrees + z[2] * 7 * nat.slantVariation) * DEG),
-        lift: z[3] * 0.07 * nat.baselineWobble,
-        spacing: Math.max(-0.6, z[4] * 0.45 * nat.spacingVariation),
-        seed: deriveSeed(wordSeed, "ink", position),
-      };
-    });
-    tokens.push({ kind: "word", plans, chars, indices });
-    chars = [];
-    indices = [];
+    if (word.chars.length === 0) return;
+    const plans = word.chars.map((char, i) => planGlyph(char, word.indices[i]));
+    const key = ids[word.indices[0]] ?? word.indices[0];
+    tokens.push({ kind: "word", key, plans, chars: word.chars, indices: word.indices });
+    word = { chars: [], indices: [] };
   };
 
   let index = 0;
   for (const char of text) {
     if (char === "\n") {
       flushWord();
-      tokens.push({ kind: "break", index });
+      tokens.push({ kind: "break", index, key: ids[index] ?? index });
     } else if (/\s/.test(char)) {
       flushWord();
-      tokens.push({ kind: "space", index, seed: deriveSeed(seed, "space", lastWordKey) });
-      lastWordKey += "+";
+      tokens.push({ kind: "space", index, seed: deriveSeed(seed, "space", ids[index] ?? index) });
     } else {
-      chars.push(char);
-      indices.push(index);
+      word.chars.push(char);
+      word.indices.push(index);
     }
     index += char.length;
   }
@@ -179,9 +193,17 @@ export function normaliseText(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
-export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat: Naturalness, seed: number): LayoutResult {
+export function layoutText(
+  rawText: string,
+  hand: Hand,
+  page: PageSettings,
+  nat: Naturalness,
+  seed: number,
+  charIds?: number[],
+): LayoutResult {
   const text = normaliseText(rawText);
-  const { tokens, missing } = planGlyphs(text, hand, nat, seed);
+  const ids = charIds && charIds.length === text.length ? charIds : defaultCharIds(text);
+  const { tokens, missing } = planGlyphs(text, ids, hand, nat, seed);
   const xh = page.xHeightMm;
   const rightMm = page.widthMm - page.marginRightMm;
   const bottomMm = page.heightMm - page.marginBottomMm;
@@ -192,16 +214,19 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
   const carets: CaretStop[] = new Array(text.length + 1);
   const lineWidthMm = rightMm - page.marginLeftMm;
   // Random drift never makes a line rise or fall more than this, so lines don't collide.
-  const maxDrift = (page.lineSpacingMm * 0.28) / Math.max(1, lineWidthMm);
+  const maxDrift = (page.lineSpacingMm * 0.28 * Math.max(1, nat.lineDrift)) / Math.max(1, lineWidthMm);
   // The writer's own habit: every line goes a little uphill (positive) or downhill.
   const tendency = Math.tan((nat.lineSlope ?? 0) * DEG);
   let marginWalk = 0;
   let previousDrift = 0;
   let overflow = false;
 
-  const makeLine = (index: number, pageIndex: number, baselineMm: number): LineState => {
-    const rng = createRng(deriveSeed(seed, "line", index));
-    marginWalk = Math.max(-5, Math.min(5, marginWalk * 0.8 + clampedGauss(rng) * 1.3 * nat.marginDrift));
+  const marginLimit = 5 * Math.max(1, nat.marginDrift);
+  // Each line's quirks come from the first thing written on it, so adding a
+  // line higher up does not change every line below.
+  const makeLine = (index: number, pageIndex: number, baselineMm: number, key: number | string): LineState => {
+    const rng = createRng(deriveSeed(seed, "line", key));
+    marginWalk = Math.max(-marginLimit, Math.min(marginLimit, marginWalk * 0.8 + clampedGauss(rng) * 1.3 * nat.marginDrift));
     // People copy the angle of the line above, so the drift is correlated.
     const drift = Math.max(-maxDrift, Math.min(maxDrift, previousDrift * 0.6 + Math.tan(clampedGauss(rng) * 0.55 * DEG * nat.lineDrift)));
     previousDrift = drift;
@@ -224,7 +249,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
 
   const shrinkAt = (xMm: number): number => {
     const into = (xMm - (rightMm - EDGE_ZONE_MM)) / EDGE_ZONE_MM;
-    return 1 - nat.edgeShrink * 0.22 * Math.max(0, Math.min(1.3, into));
+    return Math.max(0.3, 1 - nat.edgeShrink * 0.22 * Math.max(0, Math.min(1.3, into)));
   };
 
   /** Places a word starting at startX; returns the glyphs, where each character starts and where the pen ends. */
@@ -260,7 +285,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
 
   let lineIndex = 0;
   let pageIndex = 0;
-  let line = makeLine(0, 0, firstBaselineMm);
+  let line = makeLine(0, 0, firstBaselineMm, "first");
   let cursor = line.startXMm;
   let lineHasWords = false;
 
@@ -268,9 +293,9 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
     carets[index] = { page: line.page, line: line.index, xMm, yMm: baselineAt(line, xMm) };
   };
 
-  const nextLine = (): boolean => {
+  const nextLine = (key: number): boolean => {
     lineIndex++;
-    const rng = createRng(deriveSeed(seed, "spacing", lineIndex));
+    const rng = createRng(deriveSeed(seed, "spacing", key));
     let baseline = line.baselineMm + page.lineSpacingMm * (1 + clampedGauss(rng) * 0.035 * nat.lineDrift);
     if (baseline > bottomMm) {
       if (pageIndex + 1 >= MAX_PAGES) {
@@ -280,7 +305,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
       pageIndex++;
       baseline = firstBaselineMm;
     }
-    line = makeLine(lineIndex, pageIndex, baseline);
+    line = makeLine(lineIndex, pageIndex, baseline, key);
     cursor = line.startXMm;
     lineHasWords = false;
     return true;
@@ -297,7 +322,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
   outer: for (const token of tokens) {
     if (token.kind === "break") {
       stopAt(token.index, cursor);
-      if (!nextLine()) break;
+      if (!nextLine(token.key)) break;
       continue;
     }
     if (token.kind === "space") {
@@ -309,7 +334,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
     }
     let attempt = placeWord(token.plans, token.chars, cursor, line);
     if (attempt.endX > rightMm + overflowToleranceMm && lineHasWords) {
-      if (!nextLine()) break;
+      if (!nextLine(token.key)) break;
       attempt = placeWord(token.plans, token.chars, cursor, line);
     }
     if (attempt.endX > rightMm + overflowToleranceMm) {
@@ -317,7 +342,7 @@ export function layoutText(rawText: string, hand: Hand, page: PageSettings, nat:
       for (let i = 0; i < token.plans.length; i++) {
         let piece = placeWord([token.plans[i]], [token.chars[i]], cursor, line);
         if (piece.endX > rightMm + overflowToleranceMm && lineHasWords) {
-          if (!nextLine()) break outer;
+          if (!nextLine(ids[token.indices[i]] ?? token.indices[i])) break outer;
           piece = placeWord([token.plans[i]], [token.chars[i]], cursor, line);
         }
         commit(token, piece, i);

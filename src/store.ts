@@ -12,6 +12,8 @@ export interface AppState {
   extraChars: string[];
   variantsTarget: number;
   tab: "draw" | "sheet";
+  /** A letter "Tu letra" should open on (set by "Dibujarlas ahora"). */
+  drawFocus: string | null;
 }
 
 type Listener = (state: AppState, previous: AppState) => void;
@@ -59,5 +61,6 @@ export function initialState(hand: Hand | null): AppState {
     extraChars: loadPreference<string[]>("extraChars", []),
     variantsTarget: loadPreference("variantsTarget", 3),
     tab: "draw",
+    drawFocus: null,
   };
 }

@@ -9,6 +9,8 @@ interface DesktopBridge {
   openHand(): Promise<string | null>;
   printPage(): Promise<{ ok: boolean; reason: string }>;
   exportPdf(): Promise<string | null>;
+  setViewOption(name: string, value: boolean): void;
+  onViewOption(callback: (name: string, value: boolean) => void): void;
 }
 
 declare global {
@@ -47,6 +49,12 @@ export const bridge: DesktopBridge = window.chirographum ?? {
   async printPage() {
     window.print();
     return { ok: true, reason: "" };
+  },
+  setViewOption() {
+    // No menu when running in a plain browser.
+  },
+  onViewOption() {
+    // No menu when running in a plain browser.
   },
   async exportPdf() {
     window.print();

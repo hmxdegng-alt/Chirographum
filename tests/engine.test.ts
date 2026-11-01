@@ -12,6 +12,7 @@ import {
   withVariantRemoved,
   type Hand,
 } from "../src/engine/hand";
+import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
 import { glyphPointToPage, layoutText } from "../src/engine/layout";
 import { createRng, deriveSeed } from "../src/engine/random";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
@@ -171,15 +172,48 @@ describe("layout", () => {
   });
 
   it("typing a word does not rewrite the other words", () => {
-    const before = layoutText("uno dos tres cuatro", hand, A4, nat, 9);
-    const after = layoutText("uno dos diez tres cuatro", hand, A4, nat, 9);
+    let counter = 1;
+    const fresh = () => counter++ * 7919;
+    const oldText = "uno dos tres cuatro";
+    const oldIds = Array.from({ length: oldText.length }, fresh);
+    const newText = "uno dos diez tres cuatro";
+    const newIds = updateCharIds(oldText, oldIds, newText, fresh);
+    expect(newIds.slice(0, 8)).toEqual(oldIds.slice(0, 8));
+    expect(newIds.slice(13)).toEqual(oldIds.slice(8));
+    const before = layoutText(oldText, hand, A4, nat, 9, oldIds);
+    const after = layoutText(newText, hand, A4, nat, 9, newIds);
     const word = (r: typeof before, from: number, n: number) => r.glyphs.slice(from, from + n).map((g) => [g.scale, g.rotation, g.shear, g.seed]);
-    // "tres cuatro" keeps its size, angle and ink, only its position moves.
-    // (A drawing may still change when the new word uses the same letter just before it.)
+    // "uno dos" and "tres cuatro" keep their size, angle and ink, only positions move.
+    expect(word(after, 0, 6)).toEqual(word(before, 0, 6));
     expect(word(after, 10, 10)).toEqual(word(before, 6, 10));
     const variants = (r: typeof before, from: number) => r.glyphs.slice(from).map((g) => g.variantIndex);
-    const same = variants(after, 10).filter((v, i) => v === variants(before, 6)[i]).length;
-    expect(same).toBeGreaterThanOrEqual(8);
+    const changed = variants(after, 10).filter((v, i) => v !== variants(before, 6)[i]).length;
+    // At most the next occurrence of a letter the new word also uses may change.
+    expect(changed).toBeLessThanOrEqual(2);
+  });
+
+  it("an edit never sets off a chain of changes along the page", () => {
+    let counter = 1;
+    const fresh = () => (counter++ * 2654435761) >>> 0;
+    const oldText = "una tarta de queso que esta muy rica y tiene nata ".repeat(8);
+    const oldIds = Array.from({ length: oldText.length }, fresh);
+    for (let trial = 0; trial < 20; trial++) {
+      const at = 5 + trial;
+      const newText = oldText.slice(0, at) + "e" + oldText.slice(at);
+      const newIds = updateCharIds(oldText, oldIds, newText, fresh);
+      const before = layoutText(oldText, hand, A4, nat, 3, oldIds).glyphs.map((g) => g.variantIndex);
+      const after = layoutText(newText, hand, A4, nat, 3, newIds).glyphs.map((g) => g.variantIndex);
+      const glyphsBefore = [...oldText.slice(0, at)].filter((c) => hand.glyphs[c]).length;
+      let changed = 0;
+      for (let i = glyphsBefore; i < before.length; i++) if (before[i] !== after[i + 1]) changed++;
+      // Only the next couple of the same letter may change, never the rest of the page.
+      expect(changed).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it("the typing animation renews only the edited word", () => {
+    expect(editedWordRange("hola mundo", "hola munxdo")).toEqual({ start: 5, end: 11 });
+    expect(editedWordRange("ab cd", "ab  cd")).toEqual({ start: 3, end: 6 });
   });
 
   it("maps glyph points onto the page with y growing downwards", () => {
