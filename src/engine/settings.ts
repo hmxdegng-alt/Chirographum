@@ -89,6 +89,8 @@ export interface Naturalness {
   lineSlope: number;
   /** An old pen that skips: gaps and faint stretches inside the line (0–1). */
   inkSkips: number;
+  /** The highlighter drags a little fresh ink along with it (0–1). */
+  highlighterSmear: number;
 }
 
 export interface Preset {
@@ -114,6 +116,7 @@ export const PRESETS: Preset[] = [
       inkTexture: 0.35,
       lineSlope: 0,
       inkSkips: 0,
+      highlighterSmear: 0.2,
     },
   },
   {
@@ -132,6 +135,7 @@ export const PRESETS: Preset[] = [
       inkTexture: 0.5,
       lineSlope: 0,
       inkSkips: 0,
+      highlighterSmear: 0.45,
     },
   },
   {
@@ -150,6 +154,7 @@ export const PRESETS: Preset[] = [
       inkTexture: 0.65,
       lineSlope: 0,
       inkSkips: 0,
+      highlighterSmear: 0.75,
     },
   },
 ];

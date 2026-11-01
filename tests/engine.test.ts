@@ -30,12 +30,16 @@ import {
   highlightColorIndex,
   rangeHasMark,
   SCRIBBLE,
+  SCRIBBLE_KINDS,
+  scribbleFields,
+  scribbleStyleOf,
   setMark,
   UNDERLINE,
   updateMarks,
   updateParagraphs,
 } from "../src/engine/rich-text";
 import { createRng, deriveSeed } from "../src/engine/random";
+import { scribbleStrokes } from "../src/engine/scribble";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
@@ -288,6 +292,19 @@ describe("random preset", () => {
   });
 });
 
+const documentDefaults = {
+  penId: "gel-07",
+  inkColor: "#22399a",
+  penTuning: { widthScale: 1, inkStrength: 1 },
+  page: A4,
+  presetId: "normal",
+  naturalness: presetById("normal").values,
+  seed: 42,
+  paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, print: true },
+  titleUnderline: true,
+  naturalnessAmount: 1,
+};
+
 describe("documents", () => {
   const defaults = {
     penId: "gel-07",
@@ -489,5 +506,65 @@ describe("run styles (instrument, colour and size of a selection)", () => {
     const old = (2 << 5) | 16;
     expect(highlightColorIndex(upgradeMarkV1(old))).toBe(2);
     expect(upgradeMarkV1(old) & HIGHLIGHT).toBe(HIGHLIGHT);
+  });
+});
+
+describe("scribbles", () => {
+  const area = { x0: 20, x1: 45, y0: 50, y1: 50.4, xhMm: 2.8, seed: 99 };
+  const inkLength = (strokes: { x: number; y: number }[][]) =>
+    strokes.reduce((sum, s) => sum + s.slice(1).reduce((l, p, i) => l + Math.hypot(p.x - s[i].x, p.y - s[i].y), 0), 0);
+
+  it("every kind covers the word and stays near its line", () => {
+    for (const kind of SCRIBBLE_KINDS) {
+      for (const rage of [0, 0.5, 1]) {
+        const strokes = scribbleStrokes(area, { kind, rage, width: 1, perWord: false });
+        const points = strokes.flat();
+        expect(points.length).toBeGreaterThan(10);
+        for (const p of points) {
+          expect(Number.isFinite(p.x) && Number.isFinite(p.y) && p.p > 0).toBe(true);
+          expect(p.y).toBeGreaterThan(50 - 3 * 2.8);
+          expect(p.y).toBeLessThan(50.4 + 1.5 * 2.8);
+        }
+        const xs = points.map((p) => p.x);
+        expect(Math.min(...xs)).toBeLessThan(area.x0 + 1);
+        expect(Math.max(...xs)).toBeGreaterThan(area.x1 - 1);
+      }
+    }
+  });
+
+  it("more rage, more ink", () => {
+    for (const kind of SCRIBBLE_KINDS) {
+      const calm = inkLength(scribbleStrokes(area, { kind, rage: 0, width: 1, perWord: false }));
+      const angry = inkLength(scribbleStrokes(area, { kind, rage: 1, width: 1, perWord: false }));
+      expect(angry).toBeGreaterThan(calm * 1.3);
+    }
+  });
+
+  it("a cross is drawn with the pen lifted between lines", () => {
+    expect(scribbleStrokes(area, { kind: "cross", rage: 0, width: 1, perWord: false })).toHaveLength(2);
+  });
+
+  it("word by word ends at every space; in one go it spans the words", () => {
+    const hand = syntheticHand("unodstrecaiflhvz");
+    const nat = { ...presetById("normal").values, sizeVariation: 0 };
+    const text = "uno dos tres";
+    const all = new Array(text.length).fill(SCRIBBLE);
+    const together = layoutText(text, hand, A4, nat, 3, undefined, { marks: all });
+    expect(together.decorations.filter((d) => d.kind === "scribble")).toHaveLength(1);
+    const { marks, styles } = applyRunStyle(all, [], 0, text.length, scribbleFields({ ...scribbleStyleOf(undefined), perWord: true }));
+    const apart = layoutText(text, hand, A4, nat, 3, undefined, { marks, runStyles: styles });
+    expect(apart.decorations.filter((d) => d.kind === "scribble")).toHaveLength(3);
+  });
+
+  it("only what differs from the default look is kept, and documents keep it", () => {
+    const { styles } = applyRunStyle([0, 0], [], 0, 2, scribbleFields({ kind: "zigzag", rage: 0.5, width: 1, perWord: false }));
+    expect(styles).toEqual([]);
+    const loops = applyRunStyle([SCRIBBLE, SCRIBBLE], [], 0, 2, scribbleFields({ kind: "loops", rage: 0.9, width: 1.5, perWord: true }));
+    expect(loops.styles).toEqual([{ scribbleKind: "loops", scribbleRage: 0.9, scribbleWidth: 1.5, scribbleWords: true }]);
+    const doc = { text: "ab", charIds: [1, 2], marks: loops.marks, paragraphs: [0], runStyles: loops.styles, settings: { ...documentDefaults } };
+    const back = parseDocument(serializeDocument(doc), documentDefaults);
+    expect(scribbleStyleOf(back.runStyles[0])).toEqual({ kind: "loops", rage: 0.9, width: 1.5, perWord: true });
+    const damaged = parseDocument(JSON.stringify({ format: "chirographum-document", version: 1, text: "ab", runStyles: [7, { scribbleKind: "nope", scribbleRage: 9 }] }), documentDefaults);
+    expect(damaged.runStyles).toEqual([{}, { scribbleRage: 1 }]);
   });
 });

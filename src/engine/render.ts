@@ -13,7 +13,8 @@ import type { Hand } from "./hand";
 import { glyphPointToPage, type Decoration, type LayoutResult } from "./layout";
 import { PENCIL_COLOR, penById, type PenModel } from "./pens";
 import { createRng, deriveSeed, type Rng } from "./random";
-import { HIGHLIGHT_COLORS, type RunStyle } from "./rich-text";
+import { HIGHLIGHT_COLORS, scribbleStyleOf, type RunStyle } from "./rich-text";
+import { scribbleStrokes } from "./scribble";
 import { paperFirstLine, paperRuling, type Naturalness, type PageSettings, type PaperSettings } from "./settings";
 
 export interface RenderOptions {
@@ -467,6 +468,7 @@ const HIGHLIGHTER: PenModel = {
   startBlob: 0.05,
   endBlob: 0.05,
   skipProne: 0,
+  smear: 0,
   softnessMm: 0.05,
 };
 
@@ -475,7 +477,6 @@ const HIGHLIGHTER: PenModel = {
  * little, is never perfectly straight and lightens where the pen lifts.
  */
 function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
-  if (d.kind === "scribble") return scribble(d, pxPerMm);
   const rng = createRng(d.seed);
   const xh = d.xhMm;
   const length = Math.max(0.5, d.x1 - d.x0);
@@ -500,53 +501,6 @@ function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: nu
 }
 
 const DEG = Math.PI / 180;
-
-/**
- * Blotting out a mistake: a fast scribble back and forth over the word until
- * it is covered, the way people do it in a hurry. Leaning strokes with
- * rounded turns, never two the same height.
- */
-function scribble(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
-  const rng = createRng(d.seed);
-  const xh = d.xhMm;
-  const left = d.x0 - (0.08 + 0.15 * rng.next()) * xh;
-  const right = d.x1 + (0.1 + 0.2 * rng.next()) * xh;
-  const middle = -0.5 * xh;
-  const half = 0.66 * xh;
-  const lean = 0.22 + 0.18 * rng.next();
-  // Far enough apart to see the strokes; the way back crosses the way there.
-  const stroke = (0.3 + 0.08 * rng.next()) * xh;
-  const samples = 6;
-  const baselineAt = (x: number) => d.y0 + ((d.y1 - d.y0) * (x - d.x0)) / Math.max(0.01, d.x1 - d.x0);
-  // A triangle wave with soft turns: straight strokes, quick round ends.
-  const SOFT = 0.94;
-  const wave = (k: number) => Math.asin(SOFT * Math.cos(Math.PI * k)) / Math.asin(SOFT);
-  const points: { x: number; y: number; p: number }[] = [];
-  for (const [from, to, phase, passLean] of [
-    [left, right, 0, lean],
-    [right, left, 0.5, lean - 0.3 - 0.15 * rng.next()],
-  ] as const) {
-    const strokes = Math.max(2, Math.round(Math.abs(to - from) / stroke));
-    const heights = Array.from({ length: strokes + 2 }, () => 0.75 + 0.4 * rng.next());
-    const centres = Array.from({ length: strokes + 2 }, () => (rng.next() - 0.5) * 0.2 * xh);
-    const total = strokes * samples;
-    for (let s = 0; s <= total; s++) {
-      const k = s / samples;
-      const i = Math.floor(k);
-      const f = k - i;
-      const ease = f * f * (3 - 2 * f);
-      const height = heights[i] + (heights[i + 1] - heights[i]) * ease;
-      const centre = centres[i] + (centres[i + 1] - centres[i]) * ease;
-      const rise = wave(k + phase) * half * height;
-      const along = from + ((to - from) * s) / total;
-      const x = along + rise * passLean;
-      const y = baselineAt(along) + middle + centre - rise;
-      // Pressing a little harder on the longer strokes.
-      points.push({ x: x * pxPerMm, y: y * pxPerMm, p: 0.8 + 0.45 * (height - 0.75) });
-    }
-  }
-  return points;
-}
 
 /** Translucent marker strokes on a layer of their own (layers stacked so overlaps darken). */
 function renderMarkerStrokes(
@@ -671,7 +625,7 @@ export function renderPage(
   };
 
   // Geometry of every stroke on this page: letters (bold ones twice) and hand-drawn lines.
-  const highlights: { geometry: StrokeGeometry; color: number }[] = [];
+  const highlights: { geometry: StrokeGeometry; color: number; smear: number; seed: number }[] = [];
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -714,14 +668,27 @@ export function renderPage(
   }
   for (const d of layout.decorations) {
     if (d.page !== options.pageIndex) continue;
-    const points = handLine(d, pxPerMm);
     const rng = createRng(deriveSeed(d.seed, "ink"));
+    if (d.kind === "scribble") {
+      const group = groupFor(d.style ?? 0);
+      const look = scribbleStyleOf(d.style > 0 ? runStyles[d.style - 1] : undefined);
+      // People press harder when they blot something out.
+      const width = widthScale * 1.1 * look.width;
+      for (const stroke of scribbleStrokes(d, look)) {
+        const points = stroke.map((point) => ({ x: point.x * pxPerMm, y: point.y * pxPerMm, p: point.p }));
+        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width));
+      }
+      continue;
+    }
+    const points = handLine(d, pxPerMm);
     if (d.kind === "highlight") {
       const tip = { ...HIGHLIGHTER, widthMm: 1.35 * d.xhMm };
-      highlights.push({ geometry: strokeGeometry(points, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color });
+      // How much ink it drags depends on the instrument underneath.
+      const smear = (nat.highlighterSmear ?? 0) * groupFor(d.style ?? 0).pen.smear;
+      highlights.push({ geometry: strokeGeometry(points, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color, smear, seed: d.seed });
     } else {
       const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, widthScale * (d.kind === "scribble" ? 1.15 : 1)));
+      include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, widthScale));
     }
   }
 
@@ -790,6 +757,50 @@ export function renderPage(
     printed: printedStrength(options),
     pxPerMm,
   };
+
+  // 1b. A water-based highlighter drags a little fresh ink along: a faint
+  // trail after each letter, inside the band, in the direction it was drawn.
+  if (box) {
+    const STEPS = 8;
+    for (const item of highlights) {
+      if (item.smear < 0.01) continue;
+      const hb = strokesBox([item.geometry], 2, canvas.width, canvas.height);
+      if (!hb) continue;
+      const reach = (0.3 + 0.8 * item.smear) * pxPerMm;
+      const strength = Math.min(0.7, 0.5 * item.smear);
+      const trail = createCanvas(hb.width, hb.height);
+      const tctx = trail.getContext("2d")!;
+      tctx.filter = `blur(${Math.max(0.3, 0.1 * pxPerMm).toFixed(2)}px)`;
+      for (let i = 1; i <= STEPS; i++) {
+        tctx.globalAlpha = ((2 * strength) / STEPS) * (1 - (i - 1) / STEPS);
+        tctx.drawImage(canvas, hb.x - (reach * i) / STEPS, hb.y, hb.width, hb.height, 0, 0, hb.width, hb.height);
+      }
+      tctx.filter = "none";
+      tctx.globalAlpha = 1;
+      // Only where the highlighter went, and more in some places than others
+      // (the tip loads up, then runs clean again).
+      const band = createCanvas(hb.width, hb.height);
+      const bctx = band.getContext("2d")!;
+      bctx.lineCap = "round";
+      bctx.lineJoin = "round";
+      drawTone(bctx, item.geometry, hb.x, hb.y);
+      const rng = createRng(deriveSeed(item.seed, "smear"));
+      const patches = bctx.createLinearGradient(0, 0, hb.width, 0);
+      const stops = Math.max(2, Math.ceil(hb.width / (3 * pxPerMm)));
+      for (let s = 0; s <= stops; s++) patches.addColorStop(s / stops, `rgba(0,0,0,${(0.25 + 0.75 * rng.next()).toFixed(3)})`);
+      bctx.globalCompositeOperation = "destination-in";
+      bctx.fillStyle = patches;
+      bctx.fillRect(0, 0, hb.width, hb.height);
+      tctx.globalCompositeOperation = "destination-in";
+      tctx.drawImage(band, 0, 0);
+      band.width = 0;
+      ctx.save();
+      ctx.globalCompositeOperation = "destination-over";
+      ctx.drawImage(trail, hb.x, hb.y);
+      ctx.restore();
+      trail.width = 0;
+    }
+  }
 
   // 2. Highlighter behind the ink (dark ink shows through it, as on paper).
   let fullBox = box;

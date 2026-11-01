@@ -8,6 +8,8 @@ export interface ViewOptions {
   typingAnimation: boolean;
   /** The preview imitates how an inkjet printer lays the ink on paper. */
   printedLook: boolean;
+  /** The settings panel beside the sheet. */
+  settingsPanel: boolean;
 }
 
 type Listener = (options: ViewOptions) => void;
@@ -15,6 +17,7 @@ type Listener = (options: ViewOptions) => void;
 let options: ViewOptions = {
   typingAnimation: loadPreference("view.typingAnimation", false),
   printedLook: loadPreference("view.printedLook", false),
+  settingsPanel: loadPreference("view.settingsPanel", true),
 };
 const listeners = new Set<Listener>();
 
@@ -38,6 +41,6 @@ export function onViewOptions(listener: Listener): void {
 export function connectViewMenu(): void {
   for (const [name, value] of Object.entries(options)) bridge.setViewOption(name, value);
   bridge.onViewOption((name, value) => {
-    if (name === "typingAnimation" || name === "printedLook") setViewOption(name, value);
+    if (name === "typingAnimation" || name === "printedLook" || name === "settingsPanel") setViewOption(name, value);
   });
 }

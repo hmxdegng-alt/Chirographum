@@ -35,6 +35,11 @@ export interface PenModel {
   endBlob: number;
   /** How easily the pen skips when "El boli falla" is up (0 = never). */
   skipProne: number;
+  /**
+   * How much of the line a highlighter drags along (0 = none): gel and
+   * water-based felt tips run, ballpoint oil barely moves, graphite greys.
+   */
+  smear: number;
   /** Edge softness in millimetres (pencil and felt tips are fuzzier than gel). */
   softnessMm: number;
 }
@@ -56,6 +61,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.06,
     endBlob: 0.04,
     skipProne: 0.6,
+    smear: 1,
     softnessMm: 0.012,
   },
   {
@@ -74,6 +80,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.06,
     endBlob: 0.04,
     skipProne: 0.6,
+    smear: 0.9,
     softnessMm: 0.012,
   },
   {
@@ -92,6 +99,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.28,
     endBlob: 0,
     skipProne: 1,
+    smear: 0.12,
     softnessMm: 0.02,
   },
   {
@@ -110,6 +118,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.18,
     endBlob: 0.12,
     skipProne: 0.5,
+    smear: 1.2,
     softnessMm: 0.03,
   },
   {
@@ -128,6 +137,7 @@ export const PENS: PenModel[] = [
     startBlob: 0.1,
     endBlob: 0.06,
     skipProne: 0.8,
+    smear: 0.8,
     softnessMm: 0.04,
   },
   {
@@ -146,6 +156,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    smear: 0.35,
     softnessMm: 0.04,
   },
   {
@@ -165,6 +176,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    smear: 0.15,
     softnessMm: 0.03,
   },
   {
@@ -183,6 +195,7 @@ export const PENS: PenModel[] = [
     startBlob: 0,
     endBlob: 0,
     skipProne: 0,
+    smear: 0.25,
     softnessMm: 0.02,
   },
 ];

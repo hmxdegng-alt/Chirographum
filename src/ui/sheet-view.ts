@@ -6,7 +6,7 @@ import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids
 import type { ChiroDocument, SheetSettings } from "../engine/document";
 import { charactersNeeded, type Hand } from "../engine/hand";
 import { defaultCharIds, layoutText, normaliseText, type LayoutFormat, type LayoutResult } from "../engine/layout";
-import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, PENS, penById } from "../engine/pens";
+import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, penById } from "../engine/pens";
 import { freshSeed, hashString } from "../engine/random";
 import { renderPage } from "../engine/render";
 import {
@@ -21,9 +21,13 @@ import {
   ITALIC,
   paragraphCount,
   paragraphsInRange,
+  DEFAULT_SCRIBBLE,
   rangeHasMark,
   runStyleIndex,
   SCRIBBLE,
+  SCRIBBLE_KINDS,
+  scribbleFields,
+  scribbleStyleOf,
   setMark,
   STRIKE,
   UNDERLINE,
@@ -34,6 +38,8 @@ import {
   type Alignment,
   type ParagraphStyle,
   type RunStyle,
+  type ScribbleKind,
+  type ScribbleStyle,
 } from "../engine/rich-text";
 import {
   A4,
@@ -51,7 +57,6 @@ import {
 import { es } from "../i18n/es";
 import type { Store } from "../store";
 import { onViewOptions, setViewOption, viewOptions } from "../view-options";
-import { createColorPopover } from "./color-picker";
 import { button, h, percent, searchKey, slider, toast } from "./dom";
 import { createPageEditor } from "./page-editor";
 import { createRuler } from "./ruler";
@@ -62,7 +67,6 @@ const PRINT_DPI = 600;
 const PDF_JPEG_QUALITY = 0.92;
 const MM_PER_INCH = 25.4;
 const CSS_PX_PER_MM = 96 / MM_PER_INCH;
-const MAX_RECENT_COLORS = 6;
 /** Zoom range, relative to true size (1 = 100 %). */
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
@@ -110,6 +114,7 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "marginDrift",
   "inkTexture",
   "inkSkips",
+  "highlighterSmear",
 ];
 
 /** What the document controller needs from the sheet. */
@@ -130,7 +135,6 @@ export interface SheetDocumentApi {
 export function createSheetView(store: Store): { root: HTMLElement; onShow: () => void; document: SheetDocumentApi } {
   let penId = loadPreference("sheet.pen", DEFAULT_PEN_ID);
   let inkColor = loadPreference("sheet.color", INK_COLORS[0].value);
-  let recentColors = loadPreference<string[]>("sheet.recentColors", []);
   let page: PageSettings = { ...A4, ...loadPreference<Partial<PageSettings>>("sheet.page", {}) };
   let presetId = loadPreference("sheet.preset", DEFAULT_PRESET_ID);
   if (presetId === "random") presetId = "custom"; // v0.0.2 had "Aleatorio" in the list
@@ -154,7 +158,6 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     changed();
     savePreference("sheet.pen", penId);
     savePreference("sheet.color", inkColor);
-    savePreference("sheet.recentColors", recentColors);
     savePreference("sheet.page", page);
     savePreference("sheet.preset", presetId);
     savePreference("sheet.naturalness", naturalness);
@@ -193,6 +196,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
   let highlightColor = loadPreference("sheet.highlightColor", 0);
+  /** The last scribble chosen: the next one looks the same. */
+  let lastScribble: ScribbleStyle = { ...DEFAULT_SCRIBBLE, ...loadPreference<Partial<ScribbleStyle>>("sheet.scribbleLast", {}) };
 
   const undoStack: Snapshot[] = [];
   const redoStack: Snapshot[] = [];
@@ -310,7 +315,11 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   const FLAGS: Record<string, number> = { bold: BOLD, italic: ITALIC, underline: UNDERLINE, strike: STRIKE, highlight: HIGHLIGHT, scribble: SCRIBBLE };
 
   /** Instrument, colour or size for the selection (or for what is typed next). */
-  function changeRunStyle(change: RunStyle): void {
+  function changeRunStyle(requested: RunStyle): void {
+    const change = { ...requested };
+    // The document's own instrument and colour need no style of their own.
+    if ("penId" in change && change.penId === penId) change.penId = undefined;
+    if ("color" in change && change.color?.toLowerCase() === inkColor.toLowerCase()) change.color = undefined;
     const { start, end } = editor.selection();
     if (start === end) {
       const result = applyRunStyle([marksAt(start)], runStyles, 0, 1, change);
@@ -326,9 +335,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     });
   }
 
-  /** The run style at the cursor or at the start of the selection. */
-  const runStyleAt = (index: number): RunStyle => {
-    const style = runStyleIndex(marksAt(index));
+  /** The run style of the selection's first letter, or what the cursor will type. */
+  const selectionStyle = (): RunStyle => {
+    const { start, end } = editor.selection();
+    const style = runStyleIndex(end > start ? (marks[start] ?? 0) : marksAt(start));
     return style > 0 ? runStyles[style - 1] ?? {} : {};
   };
 
@@ -337,6 +347,28 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     pushUndo(snapshot(sel.start, sel.end), false);
     apply();
     afterTextChange();
+  }
+
+  /** Scribbles out the selection (or what is typed next) with the last look chosen, changed by `change`. */
+  function scribbleOut(change: Partial<ScribbleStyle>): void {
+    const { start, end } = editor.selection();
+    const scribbled = start === end ? Boolean(marksAt(start) & SCRIBBLE) : rangeHasMark(lastText, marks, start, end, SCRIBBLE);
+    const look = { ...(scribbled ? scribbleStyleOf(selectionStyle()) : lastScribble), ...change };
+    lastScribble = look;
+    savePreference("sheet.scribbleLast", look);
+    const fields = scribbleFields(look);
+    if (start === end) {
+      const result = applyRunStyle([marksAt(start) | SCRIBBLE], runStyles, 0, 1, fields);
+      runStyles = result.styles;
+      pendingMarks = result.marks[0];
+      updateToolbar();
+      return;
+    }
+    changeFormatting(() => {
+      const result = applyRunStyle(setMark(marks, start, end, SCRIBBLE, true), runStyles, start, end, fields);
+      marks = result.marks;
+      runStyles = result.styles;
+    });
   }
 
   function toggleFlag(flag: number, color = highlightColor, forceOn?: boolean): void {
@@ -371,7 +403,18 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       if (start === end) pendingMarks = 0;
       else changeFormatting(() => (marks = clearFlags(marks, start, end).map((m, i) => (i >= start && i < end ? withRunStyle(m, 0) : m))));
       updateToolbar();
-    } else if (kind === "format" && FLAGS[value]) toggleFlag(FLAGS[value]);
+    } else if (command === "format:scribble") {
+      const { start, end } = editor.selection();
+      const on = start === end ? !(marksAt(start) & SCRIBBLE) : !rangeHasMark(lastText, marks, start, end, SCRIBBLE);
+      if (on) scribbleOut({});
+      else toggleFlag(SCRIBBLE, highlightColor, false);
+    } else if (command === "scribble:none") toggleFlag(SCRIBBLE, highlightColor, false);
+    else if (kind === "scribble-kind" && (SCRIBBLE_KINDS as readonly string[]).includes(value)) scribbleOut({ kind: value as ScribbleKind });
+    else if (kind === "scribble-rage") scribbleOut({ rage: Math.max(0, Math.min(1, Number(value) || 0)) });
+    else if (kind === "scribble-width") scribbleOut({ width: Math.max(0.3, Math.min(4, Number(value) || 1)) });
+    else if (kind === "scribble-words") scribbleOut({ perWord: value === "1" });
+    else if (command === "view:settingsPanel") setViewOption("settingsPanel", !viewOptions().settingsPanel);
+    else if (kind === "format" && FLAGS[value]) toggleFlag(FLAGS[value]);
     else if (kind === "highlight") {
       if (value === "none") toggleFlag(HIGHLIGHT, highlightColor, false);
       else {
@@ -379,8 +422,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         savePreference("sheet.highlightColor", highlightColor);
         toggleFlag(HIGHLIGHT, highlightColor, true);
       }
-    } else if (kind === "pen") changeRunStyle({ penId: value === "default" ? undefined : value });
-    else if (kind === "ink") changeRunStyle({ color: value === "default" ? undefined : value });
+    } else if (kind === "pen") changeRunStyle({ penId: value === "default" ? undefined : penById(value).id });
+    else if (kind === "ink" && /^#[0-9a-f]{6}$/i.test(value)) changeRunStyle({ color: value });
     else if (kind === "size") changeRunStyle({ size: Number(value) || 1 });
     else if (kind === "style") setParagraphs((format) => ({ ...format, style: value as ParagraphStyle }));
     else if (kind === "align") setParagraphs((format) => ({ ...format, align: value as Alignment }));
@@ -415,7 +458,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     printedToggle.checked = options.printedLook;
     scheduleRender(0);
   });
-  const toolbar = createToolbar((command) => void runCommand(command), [zoom.bar, printedLabel], () => inkColor);
+  const toolbar = createToolbar((command) => void runCommand(command), [zoom.bar, printedLabel]);
   const ruler = createRuler({
     pageGeometry: () => {
       const first = editor.pages().find((canvas) => {
@@ -451,6 +494,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const collapsed = start === end;
     const has = (flag: number) => (collapsed ? Boolean(marksAt(start) & flag) : rangeHasMark(lastText, marks, start, end, flag));
     const paragraph = decodeParagraph(paragraphs[paragraphsInRange(lastText, start, end).first] ?? 0);
+    const selected = selectionStyle();
     toolbar.update({
       canUndo: undoStack.length > 0,
       canRedo: redoStack.length > 0,
@@ -462,67 +506,17 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       strike: has(STRIKE),
       highlight: has(HIGHLIGHT),
       scribble: has(SCRIBBLE),
-      penId: runStyleAt(start).penId ?? "default",
-      inkColor: runStyleAt(start).color ?? null,
-      size: runStyleAt(start).size ?? 1,
+      penId: penById(selected.penId ?? penId).id,
+      inkColor: selected.color ?? inkColor,
+      inkDisabled: penById(selected.penId ?? penId).kind === "pencil",
+      size: selected.size ?? 1,
+      scribbleStyle: has(SCRIBBLE) ? scribbleStyleOf(selected) : lastScribble,
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
 
   // ----- Controls -----
   const warnings = h("div", { class: "warnings" });
-
-  const penSelect = h("select", { class: "select", "aria-label": es.sheet.pen });
-  for (const pen of PENS) penSelect.append(h("option", { value: pen.id }, pen.label));
-  penSelect.value = penById(penId).id;
-  penSelect.addEventListener("change", () => {
-    penId = penSelect.value;
-    persist();
-    renderSwatches();
-    scheduleRender();
-  });
-
-  const swatchRows = h("div", { class: "swatch-rows" });
-  const customColor = createColorPopover(
-    inkColor,
-    (value) => {
-      inkColor = value;
-      persist();
-      renderSwatches();
-      scheduleRender();
-    },
-    (value) => {
-      recentColors = [value, ...recentColors.filter((c) => c.toLowerCase() !== value.toLowerCase())].slice(0, MAX_RECENT_COLORS);
-      persist();
-      renderSwatches();
-    },
-  );
-  const colorPicker = h("div", { class: "color-picker" }, swatchRows, customColor.root);
-
-  function renderSwatches(): void {
-    const disabled = penById(penId).kind === "pencil";
-    const swatch = (value: string, label: string) => {
-      const element = h("button", {
-        type: "button",
-        class: `swatch${value.toLowerCase() === inkColor.toLowerCase() ? " selected" : ""}`,
-        title: label,
-        "aria-label": label,
-        disabled,
-      });
-      element.style.background = value;
-      element.addEventListener("click", () => {
-        inkColor = value;
-        customColor.setColor(value);
-        persist();
-        renderSwatches();
-        scheduleRender();
-      });
-      return element;
-    };
-    swatchRows.replaceChildren(h("div", { class: "swatches" }, ...INK_COLORS.map((c) => swatch(c.value, c.label))));
-    if (recentColors.length > 0) swatchRows.append(h("div", { class: "swatches recent" }, ...recentColors.map((c) => swatch(c, c))));
-    customColor.setDisabled(disabled);
-  }
 
   const tuningSetters = new Map<keyof typeof penTuning, (value: number) => void>();
   const pageSetters = new Map<keyof PageSettings, (value: number) => void>();
@@ -727,13 +721,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     return details;
   };
 
-  const resetInstrument = () => {
-    penId = DEFAULT_PEN_ID;
-    inkColor = INK_COLORS[0].value;
+  const resetInk = () => {
     penTuning = { widthScale: 1, inkStrength: 1 };
-    penSelect.value = penId;
-    customColor.setColor(inkColor);
-    renderSwatches();
     for (const [key, set] of tuningSetters) set(penTuning[key]);
     persist();
     scheduleRender();
@@ -801,12 +790,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     noResults,
     warnings,
     section(
-      "instrument",
-      es.panel.instrument,
-      resetInstrument,
-      h("p", { class: "muted section-help" }, es.panel.instrumentHelp),
-      field(es.sheet.pen, penSelect),
-      field(es.sheet.color, colorPicker),
+      "ink",
+      es.panel.ink,
+      resetInk,
+      h("p", { class: "muted section-help" }, es.panel.inkHelp),
       tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
       tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
     ),
@@ -847,6 +834,20 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   );
 
   const root = h("div", { class: "sheet-view" }, previewArea, controls);
+  /** The settings panel can be put away to give the page the whole width. */
+  const showPanel = (shown: boolean) => {
+    root.classList.toggle("panel-hidden", !shown);
+    controls.hidden = !shown;
+    toolbar.setPanelShown(shown);
+    requestAnimationFrame(() => {
+      zoom.refit();
+      ruler.redraw();
+    });
+  };
+  showPanel(viewOptions().settingsPanel);
+  onViewOptions((options) => {
+    if (controls.hidden === options.settingsPanel) showPanel(options.settingsPanel);
+  });
 
   // ----- Layout and rendering -----
   function renderWarnings(result: LayoutResult): void {
@@ -1036,7 +1037,6 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     if (store.get().tab === "sheet") zoom.refit();
   });
 
-  renderSwatches();
   showPaper();
 
   const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount });
@@ -1061,9 +1061,6 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         savePreference("sheet.paper", paper);
         savePreference("sheet.titleUnderline", titleUnderline);
         showPaper();
-        penSelect.value = penId;
-        customColor.setColor(inkColor);
-        renderSwatches();
         for (const [key, set] of tuningSetters) set(penTuning[key]);
         for (const [key, set] of pageSetters) set(page[key]);
         setNaturalness(doc.settings.naturalness);

@@ -26,12 +26,46 @@ export function upgradeMarkV1(value: number): number {
   return (value & 31) | (((value >> 5) & 7) << HIGHLIGHT_COLOR_SHIFT);
 }
 
-/** An instrument, colour or size chosen for part of the text; empty fields use the document's. */
+/** Ways of scribbling out a word, from the user's own examples. */
+export const SCRIBBLE_KINDS = ["zigzag", "lines", "ovals", "cross", "loops"] as const;
+export type ScribbleKind = (typeof SCRIBBLE_KINDS)[number];
+
+export interface ScribbleStyle {
+  kind: ScribbleKind;
+  /** 0 = a calm, light correction; 1 = blotted out in anger. */
+  rage: number;
+  /** Stroke width relative to the instrument's. */
+  width: number;
+  /** Each word on its own instead of the whole selection in one go. */
+  perWord: boolean;
+}
+
+export const DEFAULT_SCRIBBLE: ScribbleStyle = { kind: "zigzag", rage: 0.5, width: 1, perWord: false };
+
+/** An instrument, colour, size or kind of scribble chosen for part of the text; empty fields use the defaults. */
 export interface RunStyle {
   penId?: string;
   color?: string;
   /** Letter size relative to the paragraph (1 = as it is). */
   size?: number;
+  scribbleKind?: ScribbleKind;
+  scribbleRage?: number;
+  scribbleWidth?: number;
+  scribbleWords?: boolean;
+}
+
+export function scribbleStyleOf(style: RunStyle | undefined): ScribbleStyle {
+  return {
+    kind: style?.scribbleKind ?? DEFAULT_SCRIBBLE.kind,
+    rage: style?.scribbleRage ?? DEFAULT_SCRIBBLE.rage,
+    width: style?.scribbleWidth ?? DEFAULT_SCRIBBLE.width,
+    perWord: style?.scribbleWords ?? DEFAULT_SCRIBBLE.perWord,
+  };
+}
+
+/** The run style fields that give a scribble this look. */
+export function scribbleFields(style: ScribbleStyle): RunStyle {
+  return { scribbleKind: style.kind, scribbleRage: style.rage, scribbleWidth: style.width, scribbleWords: style.perWord };
 }
 
 export function runStyleIndex(marks: number): number {
@@ -43,7 +77,30 @@ export function withRunStyle(marks: number, index: number): number {
 }
 
 export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
-  return a.penId === b.penId && a.color === b.color && (a.size ?? 1) === (b.size ?? 1);
+  const sa = scribbleStyleOf(a);
+  const sb = scribbleStyleOf(b);
+  return (
+    a.penId === b.penId &&
+    a.color === b.color &&
+    (a.size ?? 1) === (b.size ?? 1) &&
+    sa.kind === sb.kind &&
+    sa.rage === sb.rage &&
+    sa.width === sb.width &&
+    sa.perWord === sb.perWord
+  );
+}
+
+/** Only the fields that differ from the defaults. */
+export function cleanRunStyle(style: RunStyle): RunStyle {
+  const clean: RunStyle = {};
+  if (style.penId) clean.penId = style.penId;
+  if (style.color) clean.color = style.color;
+  if (style.size && Math.abs(style.size - 1) > 1e-6) clean.size = style.size;
+  if (style.scribbleKind && style.scribbleKind !== DEFAULT_SCRIBBLE.kind) clean.scribbleKind = style.scribbleKind;
+  if (style.scribbleRage !== undefined && Math.abs(style.scribbleRage - DEFAULT_SCRIBBLE.rage) > 1e-6) clean.scribbleRage = style.scribbleRage;
+  if (style.scribbleWidth !== undefined && Math.abs(style.scribbleWidth - DEFAULT_SCRIBBLE.width) > 1e-6) clean.scribbleWidth = style.scribbleWidth;
+  if (style.scribbleWords) clean.scribbleWords = true;
+  return clean;
 }
 
 /**
@@ -62,11 +119,8 @@ export function applyRunStyle(
   let next = marks.slice();
   const cache = new Map<number, number>();
   const indexOf = (style: RunStyle): number => {
-    const clean: RunStyle = {};
-    if (style.penId) clean.penId = style.penId;
-    if (style.color) clean.color = style.color;
-    if (style.size && Math.abs(style.size - 1) > 1e-6) clean.size = style.size;
-    if (!clean.penId && !clean.color && !clean.size) return 0;
+    const clean = cleanRunStyle(style);
+    if (Object.keys(clean).length === 0) return 0;
     const found = table.findIndex((s) => sameRunStyle(s, clean));
     if (found >= 0) return found + 1;
     if (table.length >= MAX_RUN_STYLES) {

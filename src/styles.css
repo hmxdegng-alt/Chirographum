@@ -11,6 +11,11 @@
   --warning-bg: #fff5e0;
   --warning-text: #6e4600;
   --radius: 8px;
+  /* Anything that can be clicked has a visible edge and a light fill. */
+  --control-border: #aab2bf;
+  --control-border-hover: #77829a;
+  --control-bg: #f5f6f9;
+  --control-bg-hover: #e9edf3;
   font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
   color: var(--text);
@@ -42,42 +47,43 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 56px;
-  padding: 0 16px;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px;
   background: var(--topbar);
   color: #ffffff;
   flex-shrink: 0;
 }
 
 .logo {
-  width: 34px;
-  height: 34px;
+  width: 24px;
+  height: 24px;
 }
 
 .brand {
   display: flex;
-  flex-direction: column;
-  line-height: 1.15;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 1;
 }
 
 .brand-name {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.2px;
 }
 
 .brand-phase {
-  font-size: 12px;
+  font-size: 11px;
   color: #aab1bd;
 }
 
 .tabs {
   display: flex;
-  gap: 4px;
-  margin-left: 32px;
+  gap: 2px;
+  margin-left: 20px;
   background: #2a2e35;
-  padding: 3px;
+  padding: 2px;
   border-radius: 999px;
 }
 
@@ -85,9 +91,10 @@ body {
   border: 0;
   background: transparent;
   color: #d4d8df;
-  padding: 7px 18px;
+  padding: 4px 14px;
   border-radius: 999px;
   font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
 
@@ -199,10 +206,23 @@ hr {
   width: 100%;
   font: inherit;
   color: inherit;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 8px 10px;
   background: #ffffff;
+  box-shadow: 0 1px 0 rgba(20, 30, 50, 0.06);
+}
+
+.select {
+  appearance: none;
+  padding-right: 30px;
+  background: var(--control-bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23384050' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center / 10px 6px;
+  cursor: pointer;
+}
+
+.select:hover {
+  border-color: var(--control-border-hover);
+  background-color: var(--control-bg-hover);
 }
 
 .text-input:focus,
@@ -269,13 +289,16 @@ textarea.text-input {
 }
 
 .btn-secondary {
-  background: #ffffff;
-  border-color: var(--border);
+  background: var(--control-bg);
+  border-color: var(--control-border);
   color: var(--text);
+  font-weight: 500;
+  box-shadow: 0 1px 0 rgba(20, 30, 50, 0.08);
 }
 
 .btn-secondary:hover {
-  background: #f5f6f8;
+  background: var(--control-bg-hover);
+  border-color: var(--control-border-hover);
 }
 
 .btn-ghost {
@@ -318,8 +341,16 @@ textarea.text-input {
   margin: 8px 0;
 }
 
+.check {
+  cursor: pointer;
+}
+
 .check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
   accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* ---------- Draw view ---------- */
@@ -545,10 +576,18 @@ textarea.text-input {
 
 .sheet-view {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
-  gap: 16px;
-  padding: 16px;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 12px;
+  padding: 12px;
   height: 100%;
+}
+
+.sheet-view.panel-hidden {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sheet-controls[hidden] {
+  display: none;
 }
 
 .sheet-preview {
@@ -657,7 +696,7 @@ textarea.text-input {
   width: auto;
   min-width: 140px;
   height: 30px;
-  padding: 2px 8px;
+  padding: 2px 28px 2px 8px;
 }
 
 .tool-separator {
@@ -735,6 +774,86 @@ textarea.text-input {
 
 .menu-text:hover {
   background: #eef0f4;
+}
+
+.menu-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.menu-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
+.scribble-menu {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 4px;
+  width: 300px;
+}
+
+.scribble-menu .check {
+  margin: 6px 0 0;
+}
+
+.scribble-menu .slider {
+  margin: 6px 0 0;
+}
+
+.scribble-kinds {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.scribble-kind {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 2px 3px;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  background: #ffffff;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.scribble-kind:hover {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
+}
+
+.scribble-kind.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.scribble-preview {
+  width: 48px;
+  height: 30px;
+}
+
+.scribble-preview path {
+  fill: none;
+  stroke: #1f2a5c;
+  stroke-width: 0.42;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.scribble-preview path.scribble-preview-word {
+  stroke: #9aa3b2;
+  stroke-width: 0.35;
+}
+
+.panel-toggle {
+  margin-left: 4px;
 }
 
 .narrow-select {
@@ -963,9 +1082,9 @@ textarea.text-input {
 }
 
 .panel-section {
-  border: 1px solid var(--border);
+  border: 1px solid #d3d8e0;
   border-radius: var(--radius);
-  background: #fbfbfc;
+  background: #ffffff;
 }
 
 .panel-section > summary,
@@ -984,12 +1103,17 @@ textarea.text-input {
 }
 
 .panel-section > summary {
-  padding: 9px 10px 9px 12px;
+  padding: 8px 8px 8px 12px;
   border-radius: var(--radius);
+  background: #eef1f5;
+}
+
+.panel-section[open] > summary {
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 
 .panel-section > summary:hover {
-  background: #f1f3f6;
+  background: #e4e8ee;
 }
 
 .panel-section > summary::before,
@@ -1019,15 +1143,16 @@ textarea.text-input {
   font: inherit;
   font-size: 12px;
   color: var(--accent);
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  padding: 3px 7px;
+  background: #ffffff;
+  border: 1px solid #c4cde6;
+  border-radius: 999px;
+  padding: 2px 9px;
   cursor: pointer;
 }
 
 .section-reset:hover {
   background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .panel-section:not([open]) .section-reset {
@@ -1067,10 +1192,16 @@ textarea.text-input {
   border-left-color: var(--accent-soft);
 }
 
+.slider-head {
+  gap: 8px;
+}
+
 .slider-right {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .reset-button {
@@ -1078,8 +1209,8 @@ textarea.text-input {
   font-size: 13px;
   line-height: 1;
   color: var(--accent);
-  background: transparent;
-  border: 0;
+  background: #ffffff;
+  border: 1px solid #c4cde6;
   border-radius: 4px;
   padding: 1px 4px;
   cursor: pointer;

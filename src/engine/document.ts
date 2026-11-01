@@ -2,7 +2,7 @@
 // (so it looks exactly the same when opened again) and the sheet settings.
 // It is written with whatever hand is loaded; the hand is its own file.
 
-import { compactRunStyles, decodeBytes, paragraphCount, upgradeMarkV1, type RunStyle } from "./rich-text";
+import { compactRunStyles, decodeBytes, paragraphCount, SCRIBBLE_KINDS, upgradeMarkV1, type RunStyle, type ScribbleKind } from "./rich-text";
 import { DEFAULT_PAPER, type Naturalness, type PageSettings, type PaperKind, type PaperSettings } from "./settings";
 
 export const DOCUMENT_FORMAT = "chirographum-document";
@@ -122,11 +122,18 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
     marks = [];
   }
   const runStyles: RunStyle[] = Array.isArray(data.runStyles)
-    ? data.runStyles.filter(isObject).map((r) => {
+    ? data.runStyles.map((r) => {
+        // A damaged entry stays in its place (empty), so the indices in the marks still match.
         const style: RunStyle = {};
+        if (!isObject(r)) return style;
+        const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
         if (typeof r.penId === "string") style.penId = r.penId;
         if (typeof r.color === "string" && /^#[0-9a-f]{6}$/i.test(r.color)) style.color = r.color;
-        if (typeof r.size === "number" && Number.isFinite(r.size)) style.size = Math.max(0.2, Math.min(5, r.size));
+        if (finite(r.size)) style.size = Math.max(0.2, Math.min(5, r.size));
+        if (SCRIBBLE_KINDS.includes(r.scribbleKind as ScribbleKind)) style.scribbleKind = r.scribbleKind as ScribbleKind;
+        if (finite(r.scribbleRage)) style.scribbleRage = Math.max(0, Math.min(1, r.scribbleRage));
+        if (finite(r.scribbleWidth)) style.scribbleWidth = Math.max(0.3, Math.min(4, r.scribbleWidth));
+        if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
         return style;
       })
     : [];

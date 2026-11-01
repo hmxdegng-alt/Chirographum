@@ -14,6 +14,7 @@ import {
   ITALIC,
   runStyleIndex,
   SCRIBBLE,
+  scribbleStyleOf,
   STRIKE,
   STYLE_LOOK,
   UNDERLINE,
@@ -576,7 +577,14 @@ function decorate(
       let j = i;
       // A line is drawn with one pen: a change of instrument or colour starts a new one.
       const sameInk = (k: number) => kind === "highlight" || styleAt(k) === styleAt(i) || /\s/.test(text[k]);
-      while (j + 1 < text.length && effective(j + 1) & flag && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line && sameInk(j + 1)) j++;
+      // Some people blot out word by word: then a space ends the scribble.
+      const wordByWord = kind === "scribble" && scribbleStyleOf(runStyles[styleAt(i) - 1]).perWord;
+      if (wordByWord && /\s/.test(text[i])) {
+        i++;
+        continue;
+      }
+      const goesOn = (k: number) => !(wordByWord && /\s/.test(text[k]));
+      while (j + 1 < text.length && effective(j + 1) & flag && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line && sameInk(j + 1) && goesOn(j + 1)) j++;
       let a = i;
       let b = j;
       while (a <= b && /\s/.test(text[a])) a++;
