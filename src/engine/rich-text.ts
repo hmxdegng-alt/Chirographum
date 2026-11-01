@@ -59,7 +59,12 @@ export interface RunStyle {
   highlightRound?: boolean;
   /** What was written before the correction tape went over it. */
   tipexUnder?: string;
+  /** How much ink written on the tape beads and greys (1 = as usual, 0 = like on paper). */
+  tipexInk?: number;
 }
+
+/** Strongest "tinta sobre el Típex" effect. */
+export const MAX_TIPEX_INK = 2;
 
 /** Longest text that can be written under a piece of correction tape. */
 export const MAX_TIPEX_UNDER = 120;
@@ -99,8 +104,29 @@ export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
     sa.perWord === sb.perWord &&
     Boolean(a.highlightWords) === Boolean(b.highlightWords) &&
     Boolean(a.highlightRound) === Boolean(b.highlightRound) &&
-    (a.tipexUnder ?? "") === (b.tipexUnder ?? "")
+    (a.tipexUnder ?? "") === (b.tipexUnder ?? "") &&
+    (a.tipexInk ?? 1) === (b.tipexInk ?? 1)
   );
+}
+
+/** A run style read from a file or the clipboard: only known fields, within their limits. */
+export function parseRunStyle(raw: unknown): RunStyle {
+  const style: RunStyle = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return style;
+  const r = raw as Record<string, unknown>;
+  const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  if (typeof r.penId === "string") style.penId = r.penId;
+  if (typeof r.color === "string" && /^#[0-9a-f]{6}$/i.test(r.color)) style.color = r.color;
+  if (finite(r.size)) style.size = Math.max(0.2, Math.min(5, r.size));
+  if (SCRIBBLE_KINDS.includes(r.scribbleKind as ScribbleKind)) style.scribbleKind = r.scribbleKind as ScribbleKind;
+  if (finite(r.scribbleRage)) style.scribbleRage = Math.max(0, Math.min(1, r.scribbleRage));
+  if (finite(r.scribbleWidth)) style.scribbleWidth = Math.max(0.3, Math.min(4, r.scribbleWidth));
+  if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
+  if (typeof r.highlightWords === "boolean") style.highlightWords = r.highlightWords;
+  if (typeof r.highlightRound === "boolean") style.highlightRound = r.highlightRound;
+  if (typeof r.tipexUnder === "string" && r.tipexUnder) style.tipexUnder = r.tipexUnder.replace(/[\r\n]+/g, " ").slice(0, MAX_TIPEX_UNDER);
+  if (finite(r.tipexInk)) style.tipexInk = Math.max(0, Math.min(MAX_TIPEX_INK, r.tipexInk));
+  return style;
 }
 
 /** Only the fields that differ from the defaults. */
@@ -116,6 +142,7 @@ export function cleanRunStyle(style: RunStyle): RunStyle {
   if (style.highlightWords) clean.highlightWords = true;
   if (style.highlightRound) clean.highlightRound = true;
   if (style.tipexUnder) clean.tipexUnder = style.tipexUnder.slice(0, MAX_TIPEX_UNDER);
+  if (style.tipexInk !== undefined && Math.abs(style.tipexInk - 1) > 1e-6) clean.tipexInk = style.tipexInk;
   return clean;
 }
 
@@ -225,7 +252,7 @@ export function isUnder(marks: number): boolean {
 
 export const PARAGRAPH_STYLES = ["normal", "title", "subtitle", "h1", "h2", "h3"] as const;
 export type ParagraphStyle = (typeof PARAGRAPH_STYLES)[number];
-export const ALIGNMENTS = ["left", "center", "right"] as const;
+export const ALIGNMENTS = ["left", "center", "right", "justify"] as const;
 export type Alignment = (typeof ALIGNMENTS)[number];
 
 export interface ParagraphFormat {
@@ -347,6 +374,84 @@ export function clearFlags(marks: number[], start: number, end: number): number[
   const next = marks.slice();
   for (let i = start; i < end; i++) next[i] = next[i] & ~(FLAGS | (7 << HIGHLIGHT_COLOR_SHIFT) | (7 << CORRECTION_SHIFT));
   return next;
+}
+
+// ----- Copy and paste inside the program -----
+
+/** Formatting that goes to the clipboard with copied text, so pasting it here keeps its look. */
+export interface RichClip {
+  text: string;
+  /** Marks of every character; run styles point into `styles`. */
+  marks: number[];
+  styles: RunStyle[];
+  /** Format of every paragraph the copied text touches. */
+  paragraphs: number[];
+}
+
+/** Clipboard type of the formatting (only this program reads it). */
+export const RICH_CLIP_TYPE = "application/x-chirographum-text";
+
+export function richClipOf(text: string, marks: number[], styles: RunStyle[], paragraphs: number[], start: number, end: number): RichClip {
+  const local: RunStyle[] = [];
+  const map = new Map<number, number>();
+  const clipMarks = text.slice(start, end).split("").map((_, k) => {
+    const mark = marks[start + k] ?? 0;
+    const style = runStyleIndex(mark);
+    if (style === 0) return mark;
+    let index = map.get(style);
+    if (index === undefined) {
+      local.push(cleanRunStyle(styles[style - 1] ?? {}));
+      index = local.length;
+      map.set(style, index);
+    }
+    return withRunStyle(mark, index);
+  });
+  const { first, last } = paragraphsInRange(text, start, end);
+  return { text: text.slice(start, end), marks: clipMarks, styles: local, paragraphs: paragraphs.slice(first, last + 1) };
+}
+
+/** Reads clipboard formatting; null if it is damaged or belongs to some other text. */
+export function parseRichClip(json: string, text: string): RichClip | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof data !== "object" || data === null) return null;
+  const clip = data as Record<string, unknown>;
+  if (clip.text !== text || !Array.isArray(clip.marks) || clip.marks.length !== text.length) return null;
+  const styles = Array.isArray(clip.styles) ? clip.styles.map(parseRunStyle) : [];
+  const marks = clip.marks.map((m) => {
+    const mark = typeof m === "number" && Number.isFinite(m) ? m >>> 0 : 0;
+    return runStyleIndex(mark) > styles.length ? withRunStyle(mark, 0) : mark;
+  });
+  const paragraphs = Array.isArray(clip.paragraphs) ? clip.paragraphs.map((v) => (typeof v === "number" && Number.isFinite(v) ? v & 31 : 0)) : [];
+  return { text, marks, styles, paragraphs };
+}
+
+/** The clip's marks with their run styles found in (or added to) the document's table. */
+export function adoptClipMarks(clip: RichClip, styles: RunStyle[]): { marks: number[]; styles: RunStyle[] } {
+  let table = styles.slice();
+  const map = new Map<number, number>();
+  const marks = clip.marks.map((mark) => {
+    const local = runStyleIndex(mark);
+    if (local === 0) return mark;
+    let index = map.get(local);
+    if (index === undefined) {
+      const style = cleanRunStyle(clip.styles[local - 1] ?? {});
+      const found = table.findIndex((s) => sameRunStyle(s, style));
+      if (Object.keys(style).length === 0) index = 0;
+      else if (found >= 0) index = found + 1;
+      else if (table.length < MAX_RUN_STYLES) {
+        table = [...table, style];
+        index = table.length;
+      } else index = 0;
+      map.set(local, index);
+    }
+    return withRunStyle(mark, index);
+  });
+  return { marks, styles: table };
 }
 
 // ----- Compact storage in documents -----

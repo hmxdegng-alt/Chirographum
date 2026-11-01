@@ -2,7 +2,7 @@
 // (so it looks exactly the same when opened again) and the sheet settings.
 // It is written with whatever hand is loaded; the hand is its own file.
 
-import { compactRunStyles, decodeBytes, MAX_TIPEX_UNDER, paragraphCount, SCRIBBLE_KINDS, upgradeMarkV1, type RunStyle, type ScribbleKind } from "./rich-text";
+import { compactRunStyles, decodeBytes, paragraphCount, parseRunStyle, upgradeMarkV1, type RunStyle } from "./rich-text";
 import { DEFAULT_PAPER, type Naturalness, type PageSettings, type PaperKind, type PaperSettings } from "./settings";
 
 export const DOCUMENT_FORMAT = "chirographum-document";
@@ -31,6 +31,10 @@ export interface SheetSettings {
   naturalnessAmount: number;
   /** Written with the left hand: the hand runs over what was just written. */
   leftHanded: boolean;
+  /** Hand smudges also land on underlines, strikethroughs and scribbles. */
+  smudgeMarks: boolean;
+  /** The highlighter also drags the ink of underlines, strikethroughs and scribbles. */
+  smearMarks: boolean;
 }
 
 export interface ChiroDocument {
@@ -125,25 +129,8 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
   } catch {
     marks = [];
   }
-  const runStyles: RunStyle[] = Array.isArray(data.runStyles)
-    ? data.runStyles.map((r) => {
-        // A damaged entry stays in its place (empty), so the indices in the marks still match.
-        const style: RunStyle = {};
-        if (!isObject(r)) return style;
-        const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-        if (typeof r.penId === "string") style.penId = r.penId;
-        if (typeof r.color === "string" && /^#[0-9a-f]{6}$/i.test(r.color)) style.color = r.color;
-        if (finite(r.size)) style.size = Math.max(0.2, Math.min(5, r.size));
-        if (SCRIBBLE_KINDS.includes(r.scribbleKind as ScribbleKind)) style.scribbleKind = r.scribbleKind as ScribbleKind;
-        if (finite(r.scribbleRage)) style.scribbleRage = Math.max(0, Math.min(1, r.scribbleRage));
-        if (finite(r.scribbleWidth)) style.scribbleWidth = Math.max(0.3, Math.min(4, r.scribbleWidth));
-        if (typeof r.scribbleWords === "boolean") style.scribbleWords = r.scribbleWords;
-        if (typeof r.highlightWords === "boolean") style.highlightWords = r.highlightWords;
-        if (typeof r.highlightRound === "boolean") style.highlightRound = r.highlightRound;
-        if (typeof r.tipexUnder === "string" && r.tipexUnder) style.tipexUnder = r.tipexUnder.replace(/[\r\n]+/g, " ").slice(0, MAX_TIPEX_UNDER);
-        return style;
-      })
-    : [];
+  // A damaged entry stays in its place (empty), so the indices in the marks still match.
+  const runStyles: RunStyle[] = Array.isArray(data.runStyles) ? data.runStyles.map(parseRunStyle) : [];
   if (marks.length !== text.length) marks = new Array<number>(text.length).fill(0);
   let paragraphs = Array.isArray(data.paragraphs) ? data.paragraphs.map((v) => (typeof v === "number" && Number.isFinite(v) ? v & 31 : 0)) : [];
   if (paragraphs.length !== paragraphCount(text)) paragraphs = new Array<number>(paragraphCount(text)).fill(0);
@@ -167,6 +154,8 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
     },
     titleUnderline: typeof raw.titleUnderline === "boolean" ? raw.titleUnderline : defaults.titleUnderline,
     leftHanded: typeof raw.leftHanded === "boolean" ? raw.leftHanded : (defaults.leftHanded ?? false),
+    smudgeMarks: typeof raw.smudgeMarks === "boolean" ? raw.smudgeMarks : (defaults.smudgeMarks ?? true),
+    smearMarks: typeof raw.smearMarks === "boolean" ? raw.smearMarks : (defaults.smearMarks ?? true),
     naturalnessAmount:
       typeof raw.naturalnessAmount === "number" && Number.isFinite(raw.naturalnessAmount) ? Math.max(0, Math.min(3, raw.naturalnessAmount)) : defaults.naturalnessAmount,
   };

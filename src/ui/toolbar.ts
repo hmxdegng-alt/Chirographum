@@ -7,9 +7,11 @@
 import { loadPreference, savePreference } from "../bridge";
 import { INK_COLORS, PENS } from "../engine/pens";
 import {
+  ALIGNMENTS,
   CORRECTIONS,
   HIGHLIGHT_COLORS,
   PARAGRAPH_STYLES,
+  MAX_TIPEX_INK,
   SCRIBBLE_KINDS,
   type Alignment,
   type Correction,
@@ -21,6 +23,7 @@ import { scribbleStrokes } from "../engine/scribble";
 import { es } from "../i18n/es";
 import { createColorPopover } from "./color-picker";
 import { h, percent, slider } from "./dom";
+import { drawing, ICONS } from "./icons";
 
 export interface ToolbarState {
   canUndo: boolean;
@@ -52,6 +55,8 @@ export interface ToolbarState {
   correction: Correction | null;
   /** The selection is on correction tape: something can be written under it. */
   tipexSelected: boolean;
+  /** How much the ink on that tape beads and greys (1 = as usual). */
+  tipexInk: number;
 }
 
 /** Sizes offered for a selection, relative to the paragraph. */
@@ -78,21 +83,6 @@ function scribblePreview(kind: ScribbleKind, rage: number, withWord = true): SVG
     path.setAttribute("d", stroke.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" "));
     svg.append(path);
   }
-  return svg;
-}
-
-/** An SVG drawing from fixed markup (never from user text). */
-function drawing(viewBox: string, width: number, height: number, markup: string, className = ""): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("viewBox", viewBox);
-  svg.setAttribute("width", String(width));
-  svg.setAttribute("height", String(height));
-  svg.setAttribute("aria-hidden", "true");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  if (className) svg.classList.add(className);
-  svg.innerHTML = markup;
   return svg;
 }
 
@@ -156,6 +146,14 @@ function correctionPreview(kind: Correction): SVGSVGElement {
   return drawing("0 0 30 18", 54, 32, pictures[kind], "correct-preview");
 }
 
+/** "Quitar …" in a menu: red, underlined, with a bin. */
+function removeItem(label: string, onClick: () => void): HTMLButtonElement {
+  const item = h("button", { type: "button", class: "menu-text menu-remove", role: "menuitem" }, ICONS.trash(), h("span", {}, label));
+  item.addEventListener("mousedown", (event) => event.preventDefault());
+  item.addEventListener("click", onClick);
+  return item;
+}
+
 /** The ▾ inside a button that opens a menu. */
 function menuCaret(): HTMLElement {
   return h("span", { class: "menu-caret", "aria-hidden": "true" }, "▾");
@@ -174,29 +172,6 @@ function endIcon(round: boolean): SVGSVGElement {
   band.setAttribute("stroke", "#c9b220");
   band.setAttribute("stroke-width", "0.8");
   svg.append(band);
-  return svg;
-}
-
-/** "Borrar formato": a T with a small cross, like the usual icon. */
-function clearIcon(): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("width", "16");
-  svg.setAttribute("height", "16");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(SVG_NS, "path");
-  path.setAttribute("d", "M2.5 3h9M7 3v10");
-  path.setAttribute("fill", "none");
-  path.setAttribute("stroke", "currentColor");
-  path.setAttribute("stroke-width", "1.6");
-  path.setAttribute("stroke-linecap", "round");
-  const slash = document.createElementNS(SVG_NS, "path");
-  slash.setAttribute("d", "M10.5 10.5l3 3M13.5 10.5l-3 3");
-  slash.setAttribute("fill", "none");
-  slash.setAttribute("stroke", "currentColor");
-  slash.setAttribute("stroke-width", "1.4");
-  slash.setAttribute("stroke-linecap", "round");
-  svg.append(path, slash);
   return svg;
 }
 
@@ -232,9 +207,9 @@ function alignIcon(align: Alignment): SVGSVGElement {
   svg.setAttribute("width", "16");
   svg.setAttribute("height", "16");
   svg.setAttribute("aria-hidden", "true");
-  const lines = [14, 9, 14, 9];
+  const lines = align === "justify" ? [14, 14, 14, 9] : [14, 9, 14, 9];
   lines.forEach((length, i) => {
-    const x = align === "left" ? 1 : align === "right" ? 15 - length : (16 - length) / 2;
+    const x = align === "left" || align === "justify" ? 1 : align === "right" ? 15 - length : (16 - length) / 2;
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", String(x));
     line.setAttribute("x2", String(x + length));
@@ -318,9 +293,7 @@ export function createToolbar(
     live: drawKinds,
     onInput: (value) => onCommand(`scribble-rage:${value}`),
   });
-  const removeScribble = h("button", { type: "button", class: "menu-text", role: "menuitem" }, es.toolbar.removeScribble);
-  removeScribble.addEventListener("mousedown", (event) => event.preventDefault());
-  removeScribble.addEventListener("click", () => {
+  const removeScribble = removeItem(es.toolbar.removeScribble, () => {
     scribbleMenu.hidden = true;
     onCommand("scribble:none");
   });
@@ -411,9 +384,7 @@ export function createToolbar(
     });
     colorMenu.append(item);
   });
-  const removeHighlight = h("button", { type: "button", class: "menu-text", role: "menuitem" }, es.toolbar.removeHighlight);
-  removeHighlight.addEventListener("mousedown", (event) => event.preventDefault());
-  removeHighlight.addEventListener("click", () => {
+  const removeHighlight = removeItem(es.toolbar.removeHighlight, () => {
     colorMenu.hidden = true;
     onCommand("highlight:none");
   });
@@ -476,13 +447,25 @@ export function createToolbar(
     correctMenu.hidden = true;
     onCommand("tipex-under");
   });
-  const removeCorrection = h("button", { type: "button", class: "menu-text", role: "menuitem" }, es.toolbar.removeCorrection);
-  removeCorrection.addEventListener("mousedown", (event) => event.preventDefault());
-  removeCorrection.addEventListener("click", () => {
+  const removeCorrection = removeItem(es.toolbar.removeCorrection, () => {
     correctMenu.hidden = true;
     onCommand("correct:none");
   });
-  correctMenu.append(correctKinds, correctHint, h("span", { class: "menu-rule" }), tipexUnder, removeCorrection);
+  // Only with text on tape selected: how much the ink written on it beads and greys.
+  const tipexInk = slider({
+    label: es.toolbar.tipexInk,
+    min: 0,
+    max: MAX_TIPEX_INK,
+    step: 0.05,
+    value: 1,
+    defaultValue: 1,
+    usual: [0.3, 1.5],
+    caution: 0.25,
+    format: percent,
+    onInput: (value) => onCommand(`tipex-ink:${value}`),
+  });
+  const tipexInkRow = h("div", { class: "tipex-ink", hidden: true, title: es.toolbar.tipexInkHelp }, tipexInk.root);
+  correctMenu.append(correctKinds, correctHint, tipexInkRow, h("span", { class: "menu-rule" }), tipexUnder, removeCorrection);
   correctButton.addEventListener("click", () => (correctMenu.hidden = !correctMenu.hidden));
   document.addEventListener("pointerdown", (event) => {
     if (!correctMenu.hidden && !correctMenu.contains(event.target as Node) && !correctButton.contains(event.target as Node)) correctMenu.hidden = true;
@@ -490,13 +473,13 @@ export function createToolbar(
   const correctGroup = h("div", { class: "tool-group" }, correctButton, correctMenu);
 
   // "Borrar formato", as in Docs: the selection back to plain text.
-  const clearFormat = tool(clearIcon(), es.toolbar.clearFormat, "format:clear", "icon");
+  const clearFormat = tool(ICONS.clearFormat(), es.toolbar.clearFormat, "format:clear", "icon");
 
   const panelButton = h("button", { type: "button", class: "tool icon panel-toggle", title: es.toolbar.panel, "aria-label": es.toolbar.panel, "aria-pressed": "true" }, panelIcon());
   panelButton.addEventListener("mousedown", (event) => event.preventDefault());
   panelButton.addEventListener("click", () => onCommand("view:settingsPanel"));
 
-  const aligns = (["left", "center", "right"] as Alignment[]).map((align) => ({
+  const aligns = ALIGNMENTS.map((align) => ({
     align,
     element: tool(alignIcon(align), es.toolbar.align[align], `align:${align}`, "icon"),
   }));
@@ -571,6 +554,8 @@ export function createToolbar(
         showHint(activeCorrection);
       }
       tipexUnder.disabled = !state.tipexSelected;
+      tipexInkRow.hidden = !state.tipexSelected;
+      tipexInk.set(state.tipexInk);
       tipexUnder.title = state.tipexSelected ? es.toolbar.tipexUnderHelp : es.toolbar.tipexUnderDisabled;
       squareEnds.classList.toggle("active", !state.highlightRound);
       roundEnds.classList.toggle("active", state.highlightRound);

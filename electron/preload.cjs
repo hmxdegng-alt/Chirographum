@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld("chirographum", {
   askUnsavedChanges: (name) => ipcRenderer.invoke("doc:askUnsaved", name),
   reportDocumentState: (dirty, name) => ipcRenderer.send("doc:state", Boolean(dirty), String(name)),
   closeApp: () => ipcRenderer.send("app:close"),
+  // Cut, copy or paste in the focused text box (for the right-click menu).
+  editAction: (action) => ipcRenderer.send("edit:run", String(action)),
   // Same as clicking the window's X (asks about unsaved changes). Used by tests.
   requestClose: () => ipcRenderer.send("app:requestClose"),
   onMenuCommand: (callback) => {

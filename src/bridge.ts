@@ -20,6 +20,8 @@ interface DesktopBridge {
   reportDocumentState(dirty: boolean, name: string): void;
   closeApp(): void;
   onMenuCommand(callback: (command: string) => void): void;
+  /** Cut, copy or paste in the focused text box, as the Editar menu does. */
+  editAction(action: "cut" | "copy" | "paste"): void;
 }
 
 declare global {
@@ -90,6 +92,10 @@ export const bridge: DesktopBridge = window.chirographum ?? {
   },
   closeApp() {
     window.close();
+  },
+  editAction(action) {
+    // A plain browser only lets the page cut and copy; pasting needs Ctrl+V.
+    document.execCommand(action);
   },
   onMenuCommand() {
     // No menu when running in a plain browser.

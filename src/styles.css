@@ -879,7 +879,7 @@ textarea.text-input {
   flex-direction: column;
   flex-wrap: nowrap;
   gap: 4px;
-  width: 316px;
+  width: 340px;
 }
 
 /* A button that only opens its menu: the ▾ sits inside it. */
@@ -894,9 +894,10 @@ textarea.text-input {
   opacity: 0.75;
 }
 
+/* Tiles shrink with their picture instead of spilling out of the menu (other fonts, other screens). */
 .correct-kinds {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
 }
 
@@ -905,6 +906,7 @@ textarea.text-input {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  min-width: 0;
   padding: 4px 2px 3px;
   border: 1px solid var(--control-border);
   border-radius: 6px;
@@ -927,8 +929,103 @@ textarea.text-input {
 }
 
 .correct-preview {
-  width: 54px;
-  height: 32px;
+  width: 100%;
+  max-width: 54px;
+  height: auto;
+  aspect-ratio: 54 / 32;
+}
+
+.correct-kind span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tipex-ink {
+  margin: 2px 2px 0;
+}
+
+.tipex-ink[hidden] {
+  display: none;
+}
+
+.menu-remove {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #c62828;
+}
+
+.menu-remove span {
+  text-decoration: underline;
+  text-decoration-color: #c62828;
+  text-underline-offset: 3px;
+}
+
+.menu-remove:hover {
+  background: #fdecea;
+}
+
+.slider-with-check .check {
+  margin: 2px 0 6px;
+  font-size: 12.5px;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 260px;
+  padding: 6px 0;
+  background: var(--panel);
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(20, 30, 50, 0.18), 0 10px 28px rgba(20, 30, 50, 0.18);
+  font-size: 13.5px;
+}
+
+.context-item {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 16px 6px 14px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-item:hover:not(:disabled) {
+  background: #eef0f4;
+}
+
+.context-item:disabled {
+  color: #9aa1ad;
+  cursor: default;
+}
+
+.context-icon {
+  display: inline-flex;
+  color: #444b57;
+}
+
+.context-item:disabled .context-icon {
+  color: #b6bcc6;
+}
+
+.context-shortcut {
+  padding-left: 24px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.context-separator {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--border);
 }
 
 .correct-hint {
@@ -1044,7 +1141,7 @@ textarea.text-input {
 
 .scribble-kinds {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
 }
 
@@ -1053,6 +1150,7 @@ textarea.text-input {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  min-width: 0;
   padding: 4px 2px 3px;
   border: 1px solid var(--control-border);
   border-radius: 6px;
@@ -1075,8 +1173,10 @@ textarea.text-input {
 }
 
 .scribble-preview {
-  width: 48px;
-  height: 30px;
+  width: 100%;
+  max-width: 48px;
+  height: auto;
+  aspect-ratio: 48 / 30;
 }
 
 .scribble-preview path {

@@ -133,6 +133,8 @@ function buildMenu() {
         { role: "cut", label: "Cortar" },
         { role: "copy", label: "Copiar" },
         { role: "paste", label: "Pegar" },
+        // The page knows what "sin formato" means; the key is handled there too.
+        { label: "Pegar sin formato", accelerator: "CmdOrCtrl+Shift+V", registerAccelerator: false, click: () => sendCommand("paste-plain") },
         { role: "selectAll", label: "Seleccionar todo" },
       ],
     },
@@ -177,6 +179,7 @@ function buildMenu() {
             { label: "Izquierda", accelerator: "CmdOrCtrl+Shift+L", registerAccelerator: false, click: () => sendCommand("align:left") },
             { label: "Centro", accelerator: "CmdOrCtrl+Shift+E", registerAccelerator: false, click: () => sendCommand("align:center") },
             { label: "Derecha", accelerator: "CmdOrCtrl+Shift+R", registerAccelerator: false, click: () => sendCommand("align:right") },
+            { label: "Justificado", accelerator: "CmdOrCtrl+Shift+J", registerAccelerator: false, click: () => sendCommand("align:justify") },
           ],
         },
       ],
@@ -229,6 +232,13 @@ function registerIpc() {
   });
 
   ipcMain.on("app:requestClose", () => mainWindow?.close());
+
+  // Cut, copy and paste from the page's own right-click menu: the page itself cannot read the clipboard.
+  ipcMain.on("edit:run", (event, action) => {
+    if (action === "cut") event.sender.cut();
+    else if (action === "copy") event.sender.copy();
+    else if (action === "paste") event.sender.paste();
+  });
 
   ipcMain.handle("doc:askUnsaved", (_event, name) => askUnsavedChanges(String(name)));
 

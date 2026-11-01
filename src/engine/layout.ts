@@ -310,6 +310,8 @@ interface LineState {
   wobbleAmpMm: number;
   wobblePeriodMm: number;
   wobblePhase: number;
+  /** A justified line never ends exactly at the margin: how far off it ends, in millimetres. */
+  edgeJitter: number;
 }
 
 /** Text with Windows or old Mac line endings normalised; the editor and the layout use the same string. */
@@ -410,6 +412,7 @@ export function layoutText(
       wobbleAmpMm: nat.lineDrift * 0.3 * rng.next() * tired,
       wobblePeriodMm: 60 + rng.next() * 80,
       wobblePhase: rng.next() * Math.PI * 2,
+      edgeJitter: (rng.next() - 0.5) * 1.6,
     };
   };
 
@@ -490,9 +493,58 @@ export function layoutText(
     line.stops.push(index);
   };
 
-  /** Centred and right-aligned lines move once they are complete. */
-  const finishLine = () => {
+  /**
+   * Justified lines (not the last one of a paragraph) spread their words to
+   * reach the right margin, as near as a hand gets: the extra room goes into
+   * the gaps between words, never into the words.
+   */
+  const justifyLine = () => {
+    const lineGlyphs = glyphs.slice(line.firstGlyph);
+    const lineGaps = missingBoxes.slice(line.firstGap);
+    if (lineGlyphs.length === 0 && lineGaps.length === 0) return;
+    const minX = Math.min(...lineGlyphs.map((g) => g.xMm), ...lineGaps.map((g) => g.xMm));
+    const maxX = Math.max(...lineGlyphs.map((g) => g.xMm + g.widthMm), ...lineGaps.map((g) => g.xMm + g.widthMm));
+    // Where the gaps between words start: the first space of every run of spaces between ink.
+    // Not the spaces that do not move the pen (after a word written over) or those between words added above or below.
+    const word = page.wordSpacing * baseXh * line.scale;
+    const spaces = line.stops.filter((i) => /\s/.test(text[i]) && text[i] !== "\n").sort((a, b) => a - b);
+    const gaps: number[] = [];
+    spaces.forEach((i, k) => {
+      const x = carets[i].xMm;
+      if (x <= minX + 1e-6 || x >= maxX - 1e-6) return;
+      if (k > 0 && spaces[k - 1] === i - 1) return;
+      if (Math.abs(carets[i].yMm - baselineAt(line, x)) > 0.5 * baseXh) return;
+      let next = i + 1;
+      while (next < text.length && /\s/.test(text[next]) && text[next] !== "\n") next++;
+      if (!carets[next] || carets[next].xMm - x < 0.2 * word) return;
+      gaps.push(x);
+    });
+    if (gaps.length === 0) return;
+    gaps.sort((a, b) => a - b);
+    const each = Math.max(-0.5 * word, Math.min(2.5 * word, (rightMm + line.edgeJitter - maxX) / gaps.length));
+    const shift = (x: number) => {
+      let k = 0;
+      while (k < gaps.length && gaps[k] < x - 1e-6) k++;
+      return k * each;
+    };
+    for (const item of [...lineGlyphs, ...lineGaps]) {
+      const dx = shift(item.xMm);
+      item.xMm += dx;
+      item.yMm -= line.slope * dx;
+    }
+    for (const i of line.stops) {
+      const dx = shift(carets[i].xMm);
+      carets[i] = { ...carets[i], xMm: carets[i].xMm + dx, yMm: carets[i].yMm - line.slope * dx };
+    }
+  };
+
+  /** Centred, right-aligned and justified lines move once they are complete; `last` = it ends its paragraph. */
+  const finishLine = (last: boolean) => {
     if (line.align === "left") return;
+    if (line.align === "justify") {
+      if (!last) justifyLine();
+      return;
+    }
     const lineGlyphs = glyphs.slice(line.firstGlyph);
     const lineGaps = missingBoxes.slice(line.firstGap);
     if (lineGlyphs.length === 0 && lineGaps.length === 0) return;
@@ -513,7 +565,7 @@ export function layoutText(
 
   /** Next line; `paragraph` is the paragraph it belongs to, `newParagraph` adds the styles' spacing. */
   const nextLine = (key: number, paragraph: number, newParagraph: boolean): boolean => {
-    finishLine();
+    finishLine(newParagraph);
     lineIndex++;
     const rng = createRng(deriveSeed(seed, "spacing", key));
     const previous = line;
@@ -663,7 +715,7 @@ export function layoutText(
 
   // The end of the text, and anything cut off by the page limit, sits where the pen stopped.
   for (let i = carets.length - 1; i >= 0 && !carets[i]; i--) stopAt(i, cursor);
-  finishLine();
+  finishLine(true);
   for (let i = 0; i < carets.length; i++) if (!carets[i]) carets[i] = carets[i + 1] ?? carets[i - 1];
 
   const decorations = decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed);

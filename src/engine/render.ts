@@ -42,6 +42,10 @@ export interface RenderOptions {
   runStyles?: RunStyle[];
   /** Left-handed writers drag the hand over fresh ink: more and longer smudges. */
   leftHanded?: boolean;
+  /** Hand smudges also land on lines drawn by hand (underlines, strikethroughs, scribbles); default yes. */
+  smudgeMarks?: boolean;
+  /** The highlighter also drags the ink of lines drawn by hand; default yes. */
+  smearMarks?: boolean;
 }
 
 /** Pixel box around all the ink of the page, or null for an empty page. */
@@ -680,7 +684,7 @@ const HIGHLIGHTER: PenModel = {
  * A line drawn by hand under, through or over some words: it overshoots a
  * little, is never perfectly straight and lightens where the pen lifts.
  */
-function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: number; seed: number }): { x: number; y: number; p: number }[] {
+function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: number; seed: number; shift?: number }): { x: number; y: number; p: number }[] {
   const rng = createRng(span?.seed ?? d.seed);
   const xh = d.xhMm;
   const offset = d.kind === "underline" ? 0.32 * xh : d.kind === "strike" ? -0.48 * xh : -0.5 * xh;
@@ -697,7 +701,7 @@ function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: num
     const k = i / steps;
     const x = startX + (endX - startX) * k;
     const baseline = d.y0 + ((d.y1 - d.y0) * (x - d.x0)) / Math.max(0.01, d.x1 - d.x0);
-    const y = baseline + offset + jitter + tilt * (x - startX) + bow * Math.sin(Math.PI * k) + wobble(x) * 0.04 * xh;
+    const y = baseline + offset + (span?.shift ?? 0) + jitter + tilt * (x - startX) + bow * Math.sin(Math.PI * k) + wobble(x) * 0.04 * xh;
     const p = 0.55 + 0.35 * Math.sin(Math.PI * Math.min(1, k * 1.15));
     points.push({ x: x * pxPerMm, y: y * pxPerMm, p });
   }
@@ -706,8 +710,25 @@ function handLine(d: Decoration, pxPerMm: number, span?: { from: number; to: num
 
 const DEG = Math.PI / 180;
 
-/** Width of the highlighter's band, in x-heights. */
-const HIGHLIGHT_TIP = 1.65;
+/**
+ * Width of the highlighter's band, in millimetres: always the same, whatever
+ * the letter size; big letters take more than one pass, as with correction tape.
+ */
+const HIGHLIGHT_TIP_MM = 4.6;
+/** How much of the letters' height the highlighter has to cover, in x-heights (centred half an x-height up). */
+const HIGHLIGHT_COVER = 1.65;
+
+/** Up and down offsets of each pass of the highlighter over a run of letters, in millimetres. */
+export function highlightPasses(d: Decoration): number[] {
+  const need = HIGHLIGHT_COVER * d.xhMm;
+  if (need <= HIGHLIGHT_TIP_MM * 1.08) return [0];
+  const OVERLAP = 0.9;
+  const count = Math.min(6, Math.ceil((need - HIGHLIGHT_TIP_MM) / (HIGHLIGHT_TIP_MM - OVERLAP)) + 1);
+  const rng = createRng(deriveSeed(d.seed, "passes"));
+  const shifts = Array.from({ length: count }, (_, k) => -need / 2 + HIGHLIGHT_TIP_MM / 2 + ((need - HIGHLIGHT_TIP_MM) * k) / (count - 1) + (rng.next() - 0.5) * 0.3);
+  // Top to bottom or the other way round.
+  return rng.next() < 0.5 ? shifts : shifts.reverse();
+}
 
 /** What is left of letters rubbed out with an eraser: faint, soft, broken. */
 function rubbedOut(pen: PenModel): PenModel {
@@ -859,9 +880,9 @@ function tapePasses(d: Decoration, pxPerMm: number): { passes: Path2D[]; box: In
  * stroke than in the middle ("prebas de boli y lapiz.jpg"). Changes the ink
  * already on the page inside the tape; ink outside it stays as it is.
  */
-function inkOnTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox, strokePx: number, pxPerMm: number): void {
+function inkOnTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox, strokePx: number, pxPerMm: number, strength: number): void {
   const box = clampBox(area, ctx.canvas.width, ctx.canvas.height);
-  if (!box) return;
+  if (!box || strength <= 0) return;
   const mask = createCanvas(box.width, box.height);
   const m = mask.getContext("2d")!;
   m.translate(-box.x, -box.y);
@@ -889,9 +910,9 @@ function inkOnTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox
       const middle = s * s * (3 - 2 * s);
       // The edges stay dark; the middle is thin, silvery and uneven where the ink beads.
       const bead = dotNoise(Math.floor((box.x + col) / cell), Math.floor((box.y + row) / cell));
-      const keep = 1 - 0.58 * middle * (0.8 + 0.4 * bead);
+      const keep = Math.max(0.04, 1 - 0.58 * strength * middle * (0.8 + 0.4 * bead));
       data[i + 3] = Math.round(a * (1 - k + k * keep));
-      const grey = k * (0.12 + 0.6 * middle);
+      const grey = k * Math.min(1, strength * (0.12 + 0.6 * middle));
       data[i] = Math.round(data[i] + (SILVER[0] - data[i]) * grey);
       data[i + 1] = Math.round(data[i + 1] + (SILVER[1] - data[i + 1]) * grey);
       data[i + 2] = Math.round(data[i + 2] + (SILVER[2] - data[i + 2]) * grey);
@@ -975,12 +996,12 @@ const SWEEP_MM = [30, 70];
  * hand is lifted and put back a little behind where it stopped, so the
  * restart overlaps (and shows darker) and sits at a slightly different height.
  */
-function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean, round: boolean): { x: number; y: number; p: number }[][] {
-  const rng = createRng(deriveSeed(d.seed, "sweeps"));
+function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean, round: boolean, pass = 0, shift = 0): { x: number; y: number; p: number }[][] {
+  const rng = createRng(pass === 0 ? deriveSeed(d.seed, "sweeps") : deriveSeed(d.seed, "sweeps", pass));
   const xh = d.xhMm;
   // Word by word, the tip stops close to each word so the spaces stay clean.
   // A round end reaches half the tip's width further than where it stops.
-  const cap = round ? (HIGHLIGHT_TIP / 2) * xh : 0;
+  const cap = round ? HIGHLIGHT_TIP_MM / 2 : 0;
   let start: number;
   let end: number;
   if (wordByWord) {
@@ -1000,10 +1021,12 @@ function highlighterSweeps(d: Decoration, pxPerMm: number, wordByWord: boolean, 
     let to = from + SWEEP_MM[0] + (SWEEP_MM[1] - SWEEP_MM[0]) * rng.next();
     // No tiny last sweep: stretch this one to the end instead.
     if (end - to < 12) to = end;
-    sweeps.push(handLine(d, pxPerMm, { from, to: Math.min(to, end), seed: deriveSeed(d.seed, "sweep", n) }));
+    sweeps.push(handLine(d, pxPerMm, { from, to: Math.min(to, end), seed: pass === 0 ? deriveSeed(d.seed, "sweep", n) : deriveSeed(d.seed, "sweep", n, pass), shift }));
     if (to >= end) break;
     from = to - (0.8 + 2.4 * rng.next());
   }
+  // Every other pass goes back the other way.
+  if (pass % 2 === 1) return sweeps.reverse().map((sweep) => sweep.reverse());
   return sweeps;
 }
 
@@ -1139,23 +1162,52 @@ export function renderPage(
   const highlights: { geometry: StrokeGeometry; color: number; smear: number; seed: number }[] = [];
   /** Correction tape and eraser marks, drawn under the ink. */
   const corrections: { d: Decoration; graphite: boolean }[] = [];
-  const tapes: { passes: Path2D[]; box: InkBox; strokePx: number }[] = [];
+  const tapes: { passes: Path2D[]; box: InkBox; strokePx: number; strength: number }[] = [];
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   let strokeCount = 0;
-  const include = (group: InkGroup, g: StrokeGeometry, seed: number) => {
+  /** Lines drawn by hand over or under the text (not letters): where they are, for smudges and the highlighter. */
+  const markStrokes: { g: StrokeGeometry; box: InkBox }[] = [];
+  const include = (group: InkGroup, g: StrokeGeometry, seed: number, mark = false) => {
     g.seed = seed;
     const pad = Math.max(...g.widths) + blobReach(g) + softPx({ ...options, pen: group.pen }) * 3 + 2;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
     for (const sample of g.samples) {
-      minX = Math.min(minX, sample.x - pad);
-      minY = Math.min(minY, sample.y - pad);
-      maxX = Math.max(maxX, sample.x + pad);
-      maxY = Math.max(maxY, sample.y + pad);
+      x0 = Math.min(x0, sample.x - pad);
+      y0 = Math.min(y0, sample.y - pad);
+      x1 = Math.max(x1, sample.x + pad);
+      y1 = Math.max(y1, sample.y + pad);
     }
+    minX = Math.min(minX, x0);
+    minY = Math.min(minY, y0);
+    maxX = Math.max(maxX, x1);
+    maxY = Math.max(maxY, y1);
+    if (mark) markStrokes.push({ g, box: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } });
     group.strokes.push(g);
     strokeCount++;
+  };
+  /** Paints the hand-drawn lines inside `region` in white onto `target` (aligned to the region), `grow` pixels wider. */
+  const paintMarks = (target: CanvasRenderingContext2D, region: InkBox, grow: number): boolean => {
+    let any = false;
+    target.save();
+    target.lineCap = "round";
+    target.lineJoin = "round";
+    target.strokeStyle = "#ffffff";
+    for (const { g, box } of markStrokes) {
+      if (box.x > region.x + region.width || box.x + box.width < region.x || box.y > region.y + region.height || box.y + box.height < region.y) continue;
+      any = true;
+      target.lineWidth = Math.max(...g.widths) + 2 * grow;
+      target.beginPath();
+      g.samples.forEach((s, i) => (i === 0 ? target.moveTo(s.x - region.x, s.y - region.y) : target.lineTo(s.x - region.x, s.y - region.y)));
+      target.stroke();
+    }
+    target.restore();
+    return any;
   };
   const addGlyph = (glyph: PlacedGlyph, hidden: boolean) => {
     if (glyph.page !== options.pageIndex) return;
@@ -1188,7 +1240,8 @@ export function renderPage(
     const rng = createRng(deriveSeed(d.seed, "ink"));
     if (d.kind === "tipex") {
       const tape = tapePasses(d, pxPerMm);
-      if (tape) tapes.push({ ...tape, strokePx: groupFor(d.style ?? 0).pen.widthMm * widthScale * pxPerMm });
+      const strength = (d.style > 0 ? runStyles[d.style - 1]?.tipexInk : undefined) ?? 1;
+      if (tape) tapes.push({ ...tape, strokePx: groupFor(d.style ?? 0).pen.widthMm * widthScale * pxPerMm, strength });
       continue;
     }
     if (d.kind === "erased") {
@@ -1202,46 +1255,50 @@ export function renderPage(
       const width = widthScale * 1.1 * look.width;
       for (const stroke of scribbleStrokes(d, look)) {
         const points = stroke.map((point) => ({ x: point.x * pxPerMm, y: point.y * pxPerMm, p: point.p }));
-        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width), d.seed);
+        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width), d.seed, true);
       }
       continue;
     }
     if (d.kind === "highlight") {
-      const tip = { ...HIGHLIGHTER, widthMm: HIGHLIGHT_TIP * d.xhMm };
+      const tip = { ...HIGHLIGHTER, widthMm: HIGHLIGHT_TIP_MM };
       // How much ink it drags depends on the instrument underneath.
       const smear = (nat.highlighterSmear ?? 0) * groupFor(d.style ?? 0).pen.smear;
       const look = d.style > 0 ? runStyles[d.style - 1] : undefined;
       const round = Boolean(look?.highlightRound);
-      highlighterSweeps(d, pxPerMm, Boolean(look?.highlightWords), round).forEach((sweep, n) => {
-        const geometry = strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1);
-        const sweepRng = createRng(deriveSeed(d.seed, "chisel", n));
-        if (!round) {
-          // The chisel is held at a slant; its ends are drawn rough by drawChisel.
-          const lean = (4 + 18 * sweepRng.next()) * DEG;
-          geometry.chisel = { x: Math.sin(lean), y: -Math.cos(lean), seed: deriveSeed(d.seed, "ends", n), poolStart: 0, poolEnd: 0 };
-        }
-        highlights.push({ geometry, color: d.color, smear, seed: deriveSeed(d.seed, "smear", n) });
-        // Where the tip rests a moment, more ink soaks in: darker there, more often at the end.
-        const length = geometry.samples[geometry.samples.length - 1]?.s ?? 0;
-        const pool = (1 + 2 * sweepRng.next()) * pxPerMm;
-        const poolEnd = length > 3 * pool && sweepRng.next() < 0.6 ? pool : 0;
-        const poolStart = length > 3 * pool && sweepRng.next() < 0.2 ? pool * 0.6 : 0;
-        if (geometry.chisel) {
-          geometry.chisel.poolEnd = poolEnd;
-          geometry.chisel.poolStart = poolStart;
-        } else {
-          // As light as the chisel's band (which is drawn at 80 % of its tone).
-          geometry.tones = geometry.tones.map((tone) => tone * 0.82);
-          // Round ends: a darker layer over that stretch.
-          const end = poolEnd > 0 ? sliceGeometry(geometry, length - poolEnd, length) : null;
-          if (end) highlights.push({ geometry: end, color: d.color, smear: 0, seed: 0 });
-          const start = poolStart > 0 ? sliceGeometry(geometry, 0, poolStart) : null;
-          if (start) highlights.push({ geometry: start, color: d.color, smear: 0, seed: 0 });
-        }
+      // Letters taller than the tip: more passes, each a little higher or lower.
+      highlightPasses(d).forEach((shift, pass) => {
+        highlighterSweeps(d, pxPerMm, Boolean(look?.highlightWords), round, pass, shift).forEach((sweep, n) => {
+          const id = (name: string) => (pass === 0 ? deriveSeed(d.seed, name, n) : deriveSeed(d.seed, name, n, pass));
+          const geometry = strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1);
+          const sweepRng = createRng(id("chisel"));
+          if (!round) {
+            // The chisel is held at a slant; its ends are drawn rough by drawChisel.
+            const lean = (4 + 18 * sweepRng.next()) * DEG;
+            geometry.chisel = { x: Math.sin(lean), y: -Math.cos(lean), seed: id("ends"), poolStart: 0, poolEnd: 0 };
+          }
+          highlights.push({ geometry, color: d.color, smear, seed: id("smear") });
+          // Where the tip rests a moment, more ink soaks in: darker there, more often at the end.
+          const length = geometry.samples[geometry.samples.length - 1]?.s ?? 0;
+          const pool = (1 + 2 * sweepRng.next()) * pxPerMm;
+          const poolEnd = length > 3 * pool && sweepRng.next() < 0.6 ? pool : 0;
+          const poolStart = length > 3 * pool && sweepRng.next() < 0.2 ? pool * 0.6 : 0;
+          if (geometry.chisel) {
+            geometry.chisel.poolEnd = poolEnd;
+            geometry.chisel.poolStart = poolStart;
+          } else {
+            // As light as the chisel's band (which is drawn at 80 % of its tone).
+            geometry.tones = geometry.tones.map((tone) => tone * 0.82);
+            // Round ends: a darker layer over that stretch.
+            const end = poolEnd > 0 ? sliceGeometry(geometry, length - poolEnd, length) : null;
+            if (end) highlights.push({ geometry: end, color: d.color, smear: 0, seed: 0 });
+            const start = poolStart > 0 ? sliceGeometry(geometry, 0, poolStart) : null;
+            if (start) highlights.push({ geometry: start, color: d.color, smear: 0, seed: 0 });
+          }
+        });
       });
     } else {
       const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed);
+      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed, true);
     }
   }
 
@@ -1348,10 +1405,13 @@ export function renderPage(
     pxPerMm,
   };
   // 1a. Ink written on correction tape beads and dries grey, hollow in the middle.
-  for (const tape of tapes) inkOnTape(ctx, tape.passes, tape.box, tape.strokePx, pxPerMm);
+  for (const tape of tapes) inkOnTape(ctx, tape.passes, tape.box, tape.strokePx, pxPerMm, tape.strength);
 
   // 1b. A water-based highlighter drags a little fresh ink along: a faint
   // trail after each letter, inside the band, in the direction it was drawn.
+  // Lines drawn by hand under or through the words get dragged too (the wet
+  // tip also spreads them a little up and down), unless the user says not.
+  const smearMarks = options.smearMarks ?? true;
   if (box) {
     const STEPS = 8;
     for (const item of highlights) {
@@ -1360,13 +1420,51 @@ export function renderPage(
       if (!hb) continue;
       const reach = (0.3 + 0.8 * item.smear) * pxPerMm;
       const strength = Math.min(0.7, 0.5 * item.smear);
+      // What there is to drag: the ink under the band, a little to the left of it too.
+      const from = clampBox({ x: hb.x - reach, y: hb.y, width: hb.width + reach, height: hb.height }, canvas.width, canvas.height);
+      if (!from) continue;
+      const source = createCanvas(from.width, from.height);
+      const sctx = source.getContext("2d")!;
+      sctx.drawImage(canvas, from.x, from.y, from.width, from.height, 0, 0, from.width, from.height);
+      let marks: HTMLCanvasElement | null = null;
+      if (markStrokes.length > 0) {
+        marks = createCanvas(from.width, from.height);
+        if (!paintMarks(marks.getContext("2d")!, from, 1)) {
+          marks.width = 0;
+          marks = null;
+        }
+      }
+      let markInk: HTMLCanvasElement | null = null;
+      if (marks && smearMarks) {
+        markInk = createCanvas(from.width, from.height);
+        const mctx = markInk.getContext("2d")!;
+        mctx.drawImage(source, 0, 0);
+        mctx.globalCompositeOperation = "destination-in";
+        mctx.drawImage(marks, 0, 0);
+      } else if (marks) {
+        sctx.globalCompositeOperation = "destination-out";
+        sctx.drawImage(marks, 0, 0);
+      }
       const trail = createCanvas(hb.width, hb.height);
       const tctx = trail.getContext("2d")!;
       tctx.filter = `blur(${Math.max(0.3, 0.1 * pxPerMm).toFixed(2)}px)`;
       for (let i = 1; i <= STEPS; i++) {
         tctx.globalAlpha = ((2 * strength) / STEPS) * (1 - (i - 1) / STEPS);
-        tctx.drawImage(canvas, hb.x - (reach * i) / STEPS, hb.y, hb.width, hb.height, 0, 0, hb.width, hb.height);
+        tctx.drawImage(source, from.x - hb.x + (reach * i) / STEPS, from.y - hb.y);
       }
+      if (markInk) {
+        // Lines: a soft haze along them, up and down as well as along.
+        tctx.filter = `blur(${Math.max(0.5, 0.15 * pxPerMm).toFixed(2)}px)`;
+        const spread = (0.1 + 0.25 * item.smear) * pxPerMm;
+        for (let i = 1; i <= STEPS; i++) {
+          tctx.globalAlpha = ((2.6 * strength) / STEPS) * (1 - (i - 1) / STEPS);
+          const up = (i % 2 === 0 ? 1 : -1) * spread * (0.4 + (0.6 * i) / STEPS);
+          tctx.drawImage(markInk, from.x - hb.x + (reach * i) / STEPS, from.y - hb.y + up);
+        }
+        markInk.width = 0;
+      }
+      if (marks) marks.width = 0;
+      source.width = 0;
       tctx.filter = "none";
       tctx.globalAlpha = 1;
       // Only where the highlighter went, and more in some places than others
@@ -1398,74 +1496,108 @@ export function renderPage(
   // left hand runs over what it has just written and drags it to the right;
   // a right hand only catches the line above, down and to the right.
   // The slider's 100 % is a clearly visible amount; past it, bigger and darker.
+  // Lines drawn by hand get smudged too, unless the user says not.
   const smudgeAmount = (nat.handSmudges ?? 0) * 3;
   const smudging = smudgeAmount * (options.leftHanded ? 3 : 1);
   const smudgeExtra = Math.max(0, smudgeAmount - 3);
+  const smudgeMarks = options.smudgeMarks ?? true;
   /** What smudges add outside the ink, so the printed page keeps it. */
   let marksBox: InkBox | null = null;
-  if (box && smudging > 0.005) {
+  const left = Boolean(options.leftHanded);
+  /** One smudge centred at (cx, cy), in pixels; the rest of its shape comes from `rng`. */
+  const smudge = (cx: number, cy: number, xh: number, smudgePen: PenModel, rng: Rng) => {
     const STEPS = 6;
-    const left = Boolean(options.leftHanded);
+    const grow = 1 + 0.15 * smudgeExtra;
+    const rx = xh * (left ? 0.8 + 1.0 * rng.next() : 0.7 + 0.8 * rng.next()) * pxPerMm * grow;
+    const ry = xh * (0.45 + 0.35 * rng.next()) * pxPerMm;
+    const angle = left ? (rng.next() - 0.5) * 0.3 : Math.PI * (0.25 + 0.2 * rng.next());
+    const reach = xh * (left ? 0.6 + 1.0 * rng.next() : 0.4 + 0.7 * rng.next()) * pxPerMm * grow;
+    const strength = Math.min(0.95, (0.3 + 0.3 * rng.next()) * Math.min(1, smudgePen.smudge) * (1 + 0.12 * smudgeExtra));
+    const dx = Math.cos(angle) * reach;
+    const dy = Math.sin(angle) * reach;
+    const sb = clampBox({ x: cx - rx - reach, y: cy - rx - reach, width: 2 * (rx + reach), height: 2 * (rx + reach) }, canvas.width, canvas.height);
+    if (!sb) return;
+    marksBox = unionBox(marksBox, sb, canvas.width, canvas.height);
+    // What the skin can pick up: the ink around, without the hand-drawn lines if the user says so.
+    const from = clampBox({ x: sb.x - Math.abs(dx), y: sb.y - Math.abs(dy), width: sb.width + 2 * Math.abs(dx), height: sb.height + 2 * Math.abs(dy) }, canvas.width, canvas.height);
+    if (!from) return;
+    const source = createCanvas(from.width, from.height);
+    const sctx = source.getContext("2d")!;
+    sctx.drawImage(canvas, from.x, from.y, from.width, from.height, 0, 0, from.width, from.height);
+    if (!smudgeMarks && markStrokes.length > 0) {
+      sctx.globalCompositeOperation = "destination-out";
+      paintMarks(sctx, from, 1);
+    }
+    const patch = createCanvas(sb.width, sb.height);
+    const pctx = patch.getContext("2d")!;
+    pctx.filter = `blur(${Math.max(0.4, 0.15 * pxPerMm).toFixed(2)}px)`;
+    for (let i = 1; i <= STEPS; i++) {
+      pctx.globalAlpha = ((2 * strength) / STEPS) * (1 - (i - 1) / STEPS);
+      pctx.drawImage(source, from.x - sb.x + (dx * i) / STEPS, from.y - sb.y + (dy * i) / STEPS);
+    }
+    source.width = 0;
+    pctx.filter = "none";
+    pctx.globalAlpha = 1;
+    // A soft, oval patch where the skin touched.
+    pctx.globalCompositeOperation = "destination-in";
+    pctx.save();
+    pctx.translate(cx - sb.x + dx / 2, cy - sb.y + dy / 2);
+    pctx.rotate(angle);
+    pctx.scale(1, ry / rx);
+    const fade = pctx.createRadialGradient(0, 0, 0, 0, 0, rx + reach / 2);
+    fade.addColorStop(0, "rgba(0,0,0,1)");
+    fade.addColorStop(0.55, "rgba(0,0,0,0.65)");
+    fade.addColorStop(1, "rgba(0,0,0,0)");
+    pctx.fillStyle = fade;
+    const far = (rx + reach) * 4;
+    pctx.fillRect(-far, -far, 2 * far, 2 * far);
+    // The skin leaves streaks along the way it moved.
+    pctx.globalCompositeOperation = "destination-out";
+    pctx.lineCap = "round";
+    const streaks = 6 + Math.floor(rng.next() * 8);
+    for (let s = 0; s < streaks; s++) {
+      const offset = (rng.next() * 2 - 1) * rx;
+      pctx.globalAlpha = 0.3 + 0.5 * rng.next();
+      pctx.lineWidth = (0.04 + 0.12 * rng.next()) * pxPerMm;
+      pctx.beginPath();
+      pctx.moveTo(-far, offset);
+      pctx.lineTo(far, offset + (rng.next() - 0.5) * 0.2 * rx);
+      pctx.stroke();
+    }
+    pctx.restore();
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-over";
+    ctx.drawImage(patch, sb.x, sb.y);
+    ctx.restore();
+    patch.width = 0;
+  };
+  if (box && smudging > 0.005) {
     for (const glyph of layout.glyphs) {
       if (glyph.page !== options.pageIndex) continue;
       const pen = groupFor(glyph.style ?? 0).pen;
       const rng = createRng(deriveSeed(glyph.seed, "smudge"));
       if (rng.next() > Math.min(0.6, smudging * pen.smudge * (left ? 0.027 : 0.025))) continue;
-      const grow = 1 + 0.15 * smudgeExtra;
       const xh = page.xHeightMm * glyph.scale;
       const cx = (glyph.xMm + glyph.widthMm * (0.2 + 0.6 * rng.next())) * pxPerMm;
       const cy = (glyph.yMm - xh * (left ? 0.2 + 0.4 * rng.next() : 0.5 + 0.5 * rng.next())) * pxPerMm;
-      const rx = xh * (left ? 0.8 + 1.0 * rng.next() : 0.7 + 0.8 * rng.next()) * pxPerMm * grow;
-      const ry = xh * (0.45 + 0.35 * rng.next()) * pxPerMm;
-      const angle = left ? (rng.next() - 0.5) * 0.3 : Math.PI * (0.25 + 0.2 * rng.next());
-      const reach = xh * (left ? 0.6 + 1.0 * rng.next() : 0.4 + 0.7 * rng.next()) * pxPerMm * grow;
-      const strength = Math.min(0.95, (0.3 + 0.3 * rng.next()) * Math.min(1, pen.smudge) * (1 + 0.12 * smudgeExtra));
-      const dx = Math.cos(angle) * reach;
-      const dy = Math.sin(angle) * reach;
-      const sb = clampBox({ x: cx - rx - reach, y: cy - rx - reach, width: 2 * (rx + reach), height: 2 * (rx + reach) }, canvas.width, canvas.height);
-      if (!sb) continue;
-      marksBox = unionBox(marksBox, sb, canvas.width, canvas.height);
-      const patch = createCanvas(sb.width, sb.height);
-      const pctx = patch.getContext("2d")!;
-      pctx.filter = `blur(${Math.max(0.4, 0.15 * pxPerMm).toFixed(2)}px)`;
-      for (let i = 1; i <= STEPS; i++) {
-        pctx.globalAlpha = ((2 * strength) / STEPS) * (1 - (i - 1) / STEPS);
-        pctx.drawImage(canvas, sb.x - (dx * i) / STEPS, sb.y - (dy * i) / STEPS, sb.width, sb.height, 0, 0, sb.width, sb.height);
+      smudge(cx, cy, xh, pen, rng);
+    }
+    if (smudgeMarks) {
+      // Along underlines, strikethroughs and scribbles, about as often per centimetre as over letters.
+      for (const d of layout.decorations) {
+        if (d.page !== options.pageIndex || (d.kind !== "underline" && d.kind !== "strike" && d.kind !== "scribble")) continue;
+        const pen = groupFor(d.style ?? 0).pen;
+        const rng = createRng(deriveSeed(d.seed, "smudge"));
+        const perMm = (Math.min(0.6, smudging * pen.smudge * (left ? 0.027 : 0.025)) / (0.7 * d.xhMm)) * (d.kind === "scribble" ? 1.5 : 1);
+        const length = Math.max(0, d.x1 - d.x0);
+        const count = Math.floor(perMm * length + rng.next());
+        const offset = d.kind === "underline" ? 0.32 : d.kind === "strike" ? -0.48 : -0.5;
+        for (let n = 0; n < count; n++) {
+          const x = d.x0 + length * rng.next();
+          const y = d.y0 + ((d.y1 - d.y0) * (x - d.x0)) / Math.max(0.01, length) + offset * d.xhMm;
+          smudge(x * pxPerMm, y * pxPerMm, d.xhMm, pen, rng);
+        }
       }
-      pctx.filter = "none";
-      pctx.globalAlpha = 1;
-      // A soft, oval patch where the skin touched.
-      pctx.globalCompositeOperation = "destination-in";
-      pctx.save();
-      pctx.translate(cx - sb.x + dx / 2, cy - sb.y + dy / 2);
-      pctx.rotate(angle);
-      pctx.scale(1, ry / rx);
-      const fade = pctx.createRadialGradient(0, 0, 0, 0, 0, rx + reach / 2);
-      fade.addColorStop(0, "rgba(0,0,0,1)");
-      fade.addColorStop(0.55, "rgba(0,0,0,0.65)");
-      fade.addColorStop(1, "rgba(0,0,0,0)");
-      pctx.fillStyle = fade;
-      const far = (rx + reach) * 4;
-      pctx.fillRect(-far, -far, 2 * far, 2 * far);
-      // The skin leaves streaks along the way it moved.
-      pctx.globalCompositeOperation = "destination-out";
-      pctx.lineCap = "round";
-      const streaks = 6 + Math.floor(rng.next() * 8);
-      for (let s = 0; s < streaks; s++) {
-        const offset = (rng.next() * 2 - 1) * rx;
-        pctx.globalAlpha = 0.3 + 0.5 * rng.next();
-        pctx.lineWidth = (0.04 + 0.12 * rng.next()) * pxPerMm;
-        pctx.beginPath();
-        pctx.moveTo(-far, offset);
-        pctx.lineTo(far, offset + (rng.next() - 0.5) * 0.2 * rx);
-        pctx.stroke();
-      }
-      pctx.restore();
-      ctx.save();
-      ctx.globalCompositeOperation = "destination-over";
-      ctx.drawImage(patch, sb.x, sb.y);
-      ctx.restore();
-      patch.width = 0;
     }
   }
 

@@ -41,6 +41,12 @@ import {
   withCorrection,
   withHighlightColor,
   withRunStyle,
+  adoptClipMarks,
+  MAX_TIPEX_INK,
+  paragraphOfIndex,
+  parseRichClip,
+  richClipOf,
+  type RichClip,
   type Alignment,
   type Correction,
   type ParagraphStyle,
@@ -66,6 +72,8 @@ import type { Store } from "../store";
 import { onViewOptions, setViewOption, viewOptions } from "../view-options";
 import { button, h, percent, searchKey, slider, toast } from "./dom";
 import { createPageEditor } from "./page-editor";
+import { openContextMenu } from "./context-menu";
+import { ICONS } from "./icons";
 import { createRuler } from "./ruler";
 import { openTipexDialog } from "./tipex-dialog";
 import { createToolbar } from "./toolbar";
@@ -245,6 +253,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   let paper = cleanPaper(loadPreference<Partial<PaperSettings>>("sheet.paper", {}));
   let titleUnderline = loadPreference("sheet.titleUnderline", true);
   let leftHanded = loadPreference("sheet.leftHanded", false);
+  /** Smudges and the highlighter's drag also reach the lines drawn by hand (not letters). */
+  let smudgeMarks = loadPreference("sheet.smudgeMarks", true);
+  let smearMarks = loadPreference("sheet.smearMarks", true);
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
   let highlightColor = loadPreference("sheet.highlightColor", 0);
@@ -308,6 +319,34 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   };
   // Closing right after typing must not lose the last letters.
   window.addEventListener("pagehide", saveTextNow);
+  /** A paste on its way: where it goes and the formatting copied with it (null = plain). */
+  let pendingPaste: { start: number; end: number; clip: RichClip | null } | null = null;
+
+  /**
+   * After the text box took a paste: the pasted letters get the formatting
+   * they were copied with, or the formatting at the cursor (pasting without
+   * formatting, or text from another program). Paragraphs that start inside
+   * the pasted text keep the style and alignment they had.
+   */
+  function formatPaste(paste: { start: number; end: number; clip: RichClip | null }, oldText: string, oldMarks: number[], text: string, typed: number): void {
+    const inserted = text.length - (oldText.length - (paste.end - paste.start));
+    if (inserted < 0 || oldMarks.length !== oldText.length || text.slice(0, paste.start) !== oldText.slice(0, paste.start)) return;
+    let middle = new Array<number>(inserted).fill(typed);
+    const adopted = paste.clip && paste.clip.text.length === inserted ? adoptClipMarks(paste.clip, runStyles) : null;
+    if (adopted) {
+      middle = adopted.marks;
+      runStyles = adopted.styles;
+    }
+    marks = [...oldMarks.slice(0, paste.start), ...middle, ...oldMarks.slice(paste.end)];
+    if (!adopted || !paste.clip) return;
+    const breaks = paste.clip.text.split("\n").length - 1;
+    if (breaks === 0) return;
+    const first = paragraphOfIndex(text, paste.start);
+    paragraphs = paragraphs.slice();
+    if (paste.start === 0 || text[paste.start - 1] === "\n") paragraphs[first] = paste.clip.paragraphs[0] ?? paragraphs[first];
+    for (let k = 1; k <= breaks; k++) if (paste.clip.paragraphs[k] !== undefined) paragraphs[first + k] = paste.clip.paragraphs[k];
+  }
+
   const editor = createPageEditor({
     initialText,
     onInput: (raw, before) => {
@@ -315,14 +354,29 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       const edit = diffTexts(lastText, text);
       const typing = edit.inserted <= 1 && lastText.length - edit.prefix - edit.suffix <= 1;
       pushUndo(snapshot(before.start, before.end), typing);
-      const typed = marksAt(edit.prefix);
+      const paste = pendingPaste;
+      pendingPaste = null;
+      const typed = marksAt(paste ? paste.start : edit.prefix);
+      const oldText = lastText;
+      const oldMarks = marks;
       charIds = idsAfterEdit(text);
       marks = updateMarks(lastText, marks, text, typed);
       paragraphs = updateParagraphs(lastText, paragraphs, text);
+      if (paste) formatPaste(paste, oldText, oldMarks, text, typed);
       lastText = text;
       pendingMarks = null;
       afterTextChange(TYPING_RENDER_DELAY);
     },
+    // Copying takes the formatting along; pasting inside the program puts it back.
+    richCopy: (start, end) => JSON.stringify(richClipOf(lastText, marks, runStyles, paragraphs, start, end)),
+    onPaste: (text, rich, plain) => {
+      const { start, end } = editor.selection();
+      const clean = normaliseText(text);
+      pendingPaste = { start, end, clip: !plain && rich ? parseRichClip(rich, clean) : null };
+      editor.replaceSelection(clean);
+      pendingPaste = null;
+    },
+    onContextMenu: (x, y) => showContextMenu(x, y),
     onSelectionChange: () => {
       pendingMarks = null;
       updateToolbar();
@@ -514,6 +568,38 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     return first < b ? { start: a, end: b, first } : null;
   }
 
+  /** The right-click menu on the page, as in Google Docs. */
+  function showContextMenu(x: number, y: number): void {
+    const { start, end } = editor.selection();
+    const selected = end > start;
+    const m = es.contextMenu;
+    const run = (command: string) => () => void runCommand(command);
+    openContextMenu(x, y, [
+      { label: m.cut, icon: ICONS.cut, shortcut: "Ctrl+X", disabled: !selected, action: () => bridge.editAction("cut") },
+      { label: m.copy, icon: ICONS.copy, shortcut: "Ctrl+C", disabled: !selected, action: () => bridge.editAction("copy") },
+      { label: m.paste, icon: ICONS.paste, shortcut: "Ctrl+V", action: () => bridge.editAction("paste") },
+      { label: m.pastePlain, icon: ICONS.pastePlain, shortcut: "Ctrl+Mayús+V", action: run("paste-plain") },
+      { label: m.delete, icon: ICONS.trash, disabled: !selected, action: () => editor.replaceSelection("") },
+      "separator",
+      {
+        label: m.formatOptions,
+        icon: ICONS.format,
+        submenu: [
+          { label: m.bold, shortcut: "Ctrl+B", action: run("format:bold") },
+          { label: m.italic, shortcut: "Ctrl+I", action: run("format:italic") },
+          { label: m.underline, shortcut: "Ctrl+U", action: run("format:underline") },
+          { label: m.strike, shortcut: "Alt+Mayús+5", action: run("format:strike") },
+          "separator",
+          { label: m.alignLeft, shortcut: "Ctrl+Mayús+L", action: run("align:left") },
+          { label: m.alignCenter, shortcut: "Ctrl+Mayús+E", action: run("align:center") },
+          { label: m.alignRight, shortcut: "Ctrl+Mayús+R", action: run("align:right") },
+          { label: m.alignJustify, shortcut: "Ctrl+Mayús+J", action: run("align:justify") },
+        ],
+      },
+      { label: m.clearFormat, icon: ICONS.clearFormat, shortcut: "Ctrl+\\", action: run("format:clear") },
+    ]);
+  }
+
   /** "Escribir debajo del Típex": what was written before the tape, as long as the tape allows. */
   function writeUnderTipex(): void {
     const run = tipexRun();
@@ -605,10 +691,21 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       const on = start === end ? !(marksAt(start) & HIGHLIGHT) : !rangeHasMark(lastText, marks, start, end, HIGHLIGHT);
       if (on) highlightOut({});
       else toggleFlag(HIGHLIGHT, highlightColor, false);
+    } else if (command === "paste-plain") {
+      // The next paste drops its formatting; the text box itself does the pasting.
+      editor.focus();
+      editor.pastePlainNext();
+      bridge.editAction("paste");
+      return true;
     } else if (command === "tipex-under") {
       // The dialog keeps the focus (the page gets it back when it closes).
       writeUnderTipex();
       return true;
+    } else if (kind === "tipex-ink") {
+      // The whole piece of tape changes, whatever part of it is selected.
+      const run = tipexRun();
+      const strength = Math.max(0, Math.min(MAX_TIPEX_INK, Number(value) || 0));
+      if (run) changeFormatting(() => ({ marks, styles: runStyles } = applyRunStyle(marks, runStyles, run.start, run.end, { tipexInk: strength })));
     } else if (kind === "correct") correct((CORRECTIONS as readonly string[]).includes(value) ? (value as Correction) : null);
     else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
     else if (kind === "highlight-ends") highlightOut({ round: value === "round" });
@@ -720,6 +817,11 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       highlightRound: has(HIGHLIGHT) ? Boolean(selected.highlightRound) : highlightRound,
       correction: selectionCorrection(),
       tipexSelected: tipexRun() !== null,
+      tipexInk: (() => {
+        const run = tipexRun();
+        const style = run ? runStyleIndex(marks[run.first] ?? 0) : 0;
+        return (style > 0 ? runStyles[style - 1]?.tipexInk : undefined) ?? 1;
+      })(),
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
@@ -786,6 +888,27 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   };
   showPresetInfo();
 
+  /** A setting that is not a slider, findable with the search box. */
+  const field = (label: string, ...children: (Node | string)[]) =>
+    h("div", { class: "field", "data-search": searchKey(label) }, h("label", { class: "field-label" }, label), ...children);
+  const check = (input: HTMLInputElement, label: string, title?: string) =>
+    h("label", { class: "check", "data-search": searchKey(`${label} ${title ?? ""}`), title }, input, label);
+
+  // Under "Manchas de la mano" and "El fosforito arrastra la tinta": whether they also reach the lines drawn by hand.
+  const smudgeMarksBox = h("input", { type: "checkbox", checked: smudgeMarks });
+  const smearMarksBox = h("input", { type: "checkbox", checked: smearMarks });
+  smudgeMarksBox.addEventListener("change", () => {
+    smudgeMarks = smudgeMarksBox.checked;
+    savePreference("sheet.smudgeMarks", smudgeMarks);
+    changed();
+    scheduleRender();
+  });
+  smearMarksBox.addEventListener("change", () => {
+    smearMarks = smearMarksBox.checked;
+    savePreference("sheet.smearMarks", smearMarks);
+    changed();
+    scheduleRender();
+  });
   const naturalSliders = new Map<keyof Naturalness, (value: number) => void>();
   const naturalControls = NATURAL_KEYS.map((key) => {
     const range =
@@ -811,6 +934,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       },
     });
     naturalSliders.set(key, control.set);
+    if (key === "handSmudges") return h("div", { class: "slider-with-check" }, control.root, check(smudgeMarksBox, es.sheet.marksToo, es.sheet.smudgeMarksHelp));
+    if (key === "highlighterSmear") return h("div", { class: "slider-with-check" }, control.root, check(smearMarksBox, es.sheet.marksToo, es.sheet.smearMarksHelp));
     return control.root;
   });
 
@@ -936,11 +1061,6 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     },
   });
 
-  /** A setting that is not a slider, findable with the search box. */
-  const field = (label: string, ...children: (Node | string)[]) =>
-    h("div", { class: "field", "data-search": searchKey(label) }, h("label", { class: "field-label" }, label), ...children);
-  const check = (input: HTMLInputElement, label: string, title?: string) =>
-    h("label", { class: "check", "data-search": searchKey(`${label} ${title ?? ""}`), title }, input, label);
 
   const sections: HTMLDetailsElement[] = [];
   const openSections = loadPreference<Record<string, boolean>>("sheet.openSections", {});
@@ -989,6 +1109,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     leftHanded = false;
     leftHand.checked = false;
     savePreference("sheet.leftHanded", false);
+    smudgeMarks = smearMarks = true;
+    smudgeMarksBox.checked = smearMarksBox.checked = true;
+    savePreference("sheet.smudgeMarks", true);
+    savePreference("sheet.smearMarks", true);
     persist();
     relayout();
     scheduleRender();
@@ -1117,6 +1241,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       items.push(h("div", { class: "warning" }, h("span", {}, es.sheet.missing(result.missing.join(" "))), add));
     }
     if (result.overflow) items.push(h("p", { class: "warning" }, es.sheet.overflow));
+    // Printers have no white ink: on a real notebook its lines show through the tape.
+    if (paper.kind !== "blank" && !paper.print && result.decorations.some((d) => d.kind === "tipex")) items.push(h("p", { class: "warning" }, es.sheet.tipexOnNotebook));
     warnings.replaceChildren(...items);
   }
 
@@ -1142,6 +1268,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       JSON.stringify(naturalness),
       naturalnessAmount,
       String(leftHanded),
+      String(smudgeMarks),
+      String(smearMarks),
       JSON.stringify(runStyles),
       seed,
       JSON.stringify(page),
@@ -1186,6 +1314,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         pageIndex,
         runStyles,
         leftHanded,
+        smudgeMarks,
+        smearMarks,
         background: "white",
         widthScale: penTuning.widthScale,
         inkStrength: penTuning.inkStrength,
@@ -1236,6 +1366,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
           pageIndex,
           runStyles,
           leftHanded,
+          smudgeMarks,
+          smearMarks,
           background: forPdf ? "white" : "transparent",
           widthScale: penTuning.widthScale,
           inkStrength: penTuning.inkStrength,
@@ -1299,7 +1431,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   showPaper();
 
-  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount, leftHanded });
+  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount, leftHanded, smudgeMarks, smearMarks });
 
   const documentApi: SheetDocumentApi = {
     getDocument: () => ({ text: lastText, charIds, marks, paragraphs, runStyles, settings: currentSettings() }),
@@ -1318,6 +1450,12 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         leftHanded = doc.settings.leftHanded;
         leftHand.checked = leftHanded;
         savePreference("sheet.leftHanded", leftHanded);
+        smudgeMarks = doc.settings.smudgeMarks;
+        smearMarks = doc.settings.smearMarks;
+        smudgeMarksBox.checked = smudgeMarks;
+        smearMarksBox.checked = smearMarks;
+        savePreference("sheet.smudgeMarks", smudgeMarks);
+        savePreference("sheet.smearMarks", smearMarks);
         naturalnessAmount = doc.settings.naturalnessAmount;
         amountSlider.set(naturalnessAmount);
         savePreference("sheet.naturalnessAmount", naturalnessAmount);

@@ -16,8 +16,13 @@ import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
 import { decodeIds, documentTitle, DocumentFormatError, encodeIds, parseDocument, serializeDocument } from "../src/engine/document";
 import { glyphPointToPage, layoutText, placeUnderTape, tapeRoom, tapeSpan, underTextOf } from "../src/engine/layout";
 import {
+  adoptClipMarks,
   applyRunStyle,
   BOLD,
+  encodeParagraph as encodeFormat,
+  parseRichClip,
+  parseRunStyle,
+  richClipOf,
   compactRunStyles,
   decodeBytes,
   runStyleIndex,
@@ -44,6 +49,7 @@ import {
 } from "../src/engine/rich-text";
 import { createRng, deriveSeed } from "../src/engine/random";
 import { scribbleStrokes } from "../src/engine/scribble";
+import { highlightPasses } from "../src/engine/render";
 import { sliderZone } from "../src/ui/dom";
 import { penById, wornPen } from "../src/engine/pens";
 import { A4, PRESETS, presetById, randomNaturalness } from "../src/engine/settings";
@@ -350,6 +356,8 @@ const documentDefaults = {
   titleUnderline: true,
   naturalnessAmount: 1,
   leftHanded: false,
+  smudgeMarks: true,
+  smearMarks: true,
 };
 
 describe("documents", () => {
@@ -365,6 +373,8 @@ describe("documents", () => {
     titleUnderline: true,
     naturalnessAmount: 1,
     leftHanded: false,
+    smudgeMarks: true,
+    smearMarks: true,
   };
 
   it("keeps letter identities exactly", () => {
@@ -757,5 +767,76 @@ describe("corrections by hand", () => {
     const styled = applyRunStyle([0, 0], [], 0, 2, { tipexUnder: "hola" });
     expect(styled.styles[0].tipexUnder).toBe("hola");
     expect(applyRunStyle(styled.marks, styled.styles, 0, 2, { tipexUnder: undefined }).marks.map(runStyleIndex)).toEqual([0, 0]);
+  });
+});
+
+describe("copy and paste inside the program", () => {
+  it("the formatting travels with the text and finds its run styles again", () => {
+    const text = "uno dos\ntres";
+    const styles = [{ penId: "marker-medium" }, { color: "#b42128", tipexInk: 0.5 }];
+    const marks = Array.from(text, (_, i) => (i < 3 ? withRunStyle(BOLD, 1) : i > 8 ? withRunStyle(UNDERLINE, 2) : 0));
+    const title = encodeFormat({ style: "title", align: "center" });
+    const clip = richClipOf(text, marks, styles, [0, title], 0, text.length);
+    expect(clip.styles).toEqual(styles);
+    expect(clip.paragraphs).toEqual([0, title]);
+    const back = parseRichClip(JSON.stringify(clip), text)!;
+    expect(back.marks).toEqual(marks);
+    // Pasted into a document that already has the red style, in another place of its table.
+    const adopted = adoptClipMarks(back, [{ size: 2 }, { color: "#b42128", tipexInk: 0.5 }]);
+    expect(adopted.styles).toEqual([{ size: 2 }, { color: "#b42128", tipexInk: 0.5 }, { penId: "marker-medium" }]);
+    expect(adopted.marks.slice(0, 3).map(runStyleIndex)).toEqual([3, 3, 3]);
+    expect(adopted.marks[10]).toBe(withRunStyle(UNDERLINE, 2));
+    expect(adopted.marks[1] & BOLD).toBe(BOLD);
+  });
+
+  it("formatting for some other text, or damaged, is ignored", () => {
+    const clip = richClipOf("hola", [BOLD, BOLD, 0, 0], [], [0], 0, 4);
+    expect(parseRichClip(JSON.stringify(clip), "adiós")).toBeNull();
+    expect(parseRichClip("{", "hola")).toBeNull();
+    // A run style index that points nowhere becomes the document's own.
+    const bad = parseRichClip(JSON.stringify({ text: "ab", marks: [withRunStyle(0, 7), 1], styles: [] }), "ab")!;
+    expect(bad.marks.map(runStyleIndex)).toEqual([0, 0]);
+    expect(parseRunStyle({ tipexInk: 9, color: "rojo" })).toEqual({ tipexInk: 2 });
+  });
+});
+
+describe("justified paragraphs", () => {
+  const hand = syntheticHand("abcdefghij");
+  const nat = { ...presetById("normal").values, sizeVariation: 0, spacingVariation: 0, baselineWobble: 0, rotation: 0, edgeShrink: 0 };
+  const words = Array.from({ length: 60 }, (_, i) => "abcdefghij".slice(0, 2 + (i % 6))).join(" ");
+  const text = `${words}\nabc def`;
+  it("lines reach the right margin (not exactly), the last line of a paragraph does not", () => {
+    const justify = encodeFormat({ style: "normal", align: "justify" });
+    const plain = layoutText(text, hand, A4, nat, 3);
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { paragraphs: [justify, justify] });
+    const right = A4.widthMm - A4.marginRightMm;
+    const ends = new Map<number, number>();
+    for (const g of r.glyphs) {
+      const line = r.carets[g.index].line;
+      ends.set(line, Math.max(ends.get(line) ?? 0, g.xMm + g.widthMm));
+    }
+    const lines = [...ends.keys()].sort((a, b) => a - b);
+    expect(lines.length).toBeGreaterThan(3);
+    const paragraphEnd = r.carets[words.length].line;
+    for (const line of lines) {
+      if (line === paragraphEnd || line === lines[lines.length - 1]) expect(right - ends.get(line)!).toBeGreaterThan(5);
+      else expect(Math.abs(right - ends.get(line)!)).toBeLessThan(1);
+    }
+    // Words keep their letters together: only the gaps grow.
+    const first = r.glyphs.filter((g) => r.carets[g.index].line === lines[0]);
+    const before = plain.glyphs.filter((g) => plain.carets[g.index].line === lines[0]);
+    expect(first[1].xMm - first[0].xMm).toBeCloseTo(before[1].xMm - before[0].xMm, 6);
+  });
+});
+
+describe("highlighter size", () => {
+  it("one pass for normal letters, more for big ones", () => {
+    const d = { kind: "highlight" as const, page: 0, x0: 20, y0: 30, x1: 60, y1: 30, xhMm: 2.8, color: 0, style: 0, seed: 9, start: 0, end: 5 };
+    expect(highlightPasses(d)).toEqual([0]);
+    const big = highlightPasses({ ...d, xhMm: 2.8 * 2.5 });
+    expect(big.length).toBeGreaterThan(1);
+    // The passes together cover the letters' height.
+    const span = Math.max(...big) - Math.min(...big) + 4.6;
+    expect(span).toBeGreaterThan(1.65 * 2.8 * 2.5 - 0.5);
   });
 });

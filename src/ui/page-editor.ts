@@ -4,6 +4,7 @@
 // the up/down/Home/End keys into positions from the layout.
 
 import type { CaretStop, LayoutResult } from "../engine/layout";
+import { RICH_CLIP_TYPE } from "../engine/rich-text";
 import type { PageSettings } from "../engine/settings";
 import { es } from "../i18n/es";
 import { h } from "./dom";
@@ -31,6 +32,10 @@ export interface PageEditor {
   setScale(cssPxPerMm: number): void;
   setEmptyMessage(message: string | null): void;
   focus(): void;
+  /** Puts text in place of the selection, as typing or pasting would (one change for undo). */
+  replaceSelection(text: string): void;
+  /** The next paste goes in without its formatting. */
+  pastePlainNext(): void;
 }
 
 export interface PageEditorOptions {
@@ -41,6 +46,12 @@ export interface PageEditorOptions {
   onSelectionChange?: (start: number, end: number) => void;
   /** Keyboard commands: undo, redo and formatting shortcuts. */
   onCommand?: (command: string) => void;
+  /** Formatting of a copied range, to go to the clipboard with its text (null = none). */
+  richCopy?: (start: number, end: number) => string | null;
+  /** Something is pasted: its text, the formatting copied with it (if any) and whether to drop it. */
+  onPaste?: (text: string, rich: string | null, plain: boolean) => void;
+  /** Right click on a page, at this point of the window. */
+  onContextMenu?: (clientX: number, clientY: number) => void;
 }
 
 /** Formatting shortcuts, as in the most common word processors. */
@@ -58,9 +69,11 @@ function shortcutCommand(event: KeyboardEvent): string | null {
       if (key === "u") return "format:underline";
       if (key === "\\" || code === "Backslash") return "format:clear";
     } else {
+      if (key === "v") return "paste-plain";
       if (key === "l") return "align:left";
       if (key === "e") return "align:center";
       if (key === "r") return "align:right";
+      if (key === "j") return "align:justify";
       if (key === "h") return "format:highlight";
     }
   }
@@ -207,6 +220,15 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
   }
 
   function onPointerDown(event: PointerEvent, pageIndex: number): void {
+    if (event.button === 2) {
+      // Right click: a click outside the selection moves the cursor there first, as in any editor.
+      event.preventDefault();
+      input.focus({ preventScroll: true });
+      const point = pointerToPage(event, pageIndex);
+      const index = hitTest(pageIndex, point.x, point.y);
+      if (index < input.selectionStart || index > input.selectionEnd || input.selectionStart === input.selectionEnd) select(index, index);
+      return;
+    }
     if (event.button !== 0) return;
     event.preventDefault();
     input.focus({ preventScroll: true });
@@ -315,6 +337,47 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
     revealCaret = true;
     requestAnimationFrame(drawOverlay);
   });
+  // ----- Clipboard: the text, plus its formatting for pasting inside the program -----
+  let plainNext = false;
+  const copySelection = (event: ClipboardEvent): boolean => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    if (start === end || !event.clipboardData) return false;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", input.value.slice(start, end));
+    const rich = options.richCopy?.(start, end);
+    if (rich) event.clipboardData.setData(RICH_CLIP_TYPE, rich);
+    return true;
+  };
+  input.addEventListener("copy", (event) => void copySelection(event));
+  input.addEventListener("cut", (event) => {
+    if (copySelection(event)) replaceSelection("");
+  });
+  input.addEventListener("paste", (event) => {
+    const plain = plainNext;
+    plainNext = false;
+    if (!event.clipboardData || !options.onPaste) return;
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain").replace(/\r\n?/g, "\n");
+    options.onPaste(text, plain ? null : event.clipboardData.getData(RICH_CLIP_TYPE) || null, plain);
+  });
+  root.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    if (!(event.target instanceof Node) || !pageElements.some(({ paper }) => paper.contains(event.target as Node))) return;
+    options.onContextMenu?.(event.clientX, event.clientY);
+  });
+
+  function replaceSelection(text: string): void {
+    beforeInput = { start: input.selectionStart, end: input.selectionEnd };
+    input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
+    goalX = null;
+    revealCaret = true;
+    typing = true;
+    options.onInput(input.value, beforeInput);
+    queueMicrotask(() => (typing = false));
+    drawOverlay();
+  }
+
   // The selection just before a change, for undo.
   let beforeInput = { start: 0, end: 0 };
   let typing = false;
@@ -481,6 +544,10 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
     focus() {
       input.focus({ preventScroll: true });
       drawOverlay();
+    },
+    replaceSelection,
+    pastePlainNext() {
+      plainNext = true;
     },
   };
 }
