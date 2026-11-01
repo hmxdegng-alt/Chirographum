@@ -22,7 +22,7 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 2. Ábrelo. Windows avisará de «aplicación no reconocida» porque el programa no tiene firma digital (es de pago): pulsa **Más información** y después **Ejecutar de todas formas**.
 3. Sigue el instalador.
 
-Las actualizaciones se instalan igual: descargando el instalador nuevo. Tus letras, textos y ajustes se guardan en `%APPDATA%\Chirographum` y se conservan al actualizar. Al desinstalar, el programa te pregunta si quieres borrarlos también.
+Las actualizaciones se instalan igual: descargando el instalador nuevo. Tus letras, textos y ajustes se guardan en `%APPDATA%\Chirographum` y se conservan al actualizar. Al desinstalar, una casilla te deja borrarlos también (viene sin marcar).
 
 ## Cómo hacer la prueba de realismo
 
