@@ -3,17 +3,113 @@
 // alignment). Both follow the text through every edit, the same way the
 // letter identities do.
 
-// ----- Character marks (one small number per character) -----
+// ----- Character marks (one number per character) -----
+// Bits 0–5: flags. Bits 6–8: highlighter colour. Bits 9–16: run style
+// (instrument, colour and size chosen for that part of the text).
 
 export const BOLD = 1;
 export const ITALIC = 2;
 export const UNDERLINE = 4;
 export const STRIKE = 8;
 export const HIGHLIGHT = 16;
-/** Bits 5–7: which highlighter colour. */
-const HIGHLIGHT_COLOR_SHIFT = 5;
+/** Scribbled out, the way people blot a mistake. */
+export const SCRIBBLE = 32;
+const FLAGS = 63;
+const HIGHLIGHT_COLOR_SHIFT = 6;
+const STYLE_SHIFT = 9;
+export const MAX_RUN_STYLES = 255;
 
-export type MarkFlag = typeof BOLD | typeof ITALIC | typeof UNDERLINE | typeof STRIKE | typeof HIGHLIGHT;
+export type MarkFlag = typeof BOLD | typeof ITALIC | typeof UNDERLINE | typeof STRIKE | typeof HIGHLIGHT | typeof SCRIBBLE;
+
+/** Marks of version 0.1 (one byte: flags 0–4, colour 5–7) in the current layout. */
+export function upgradeMarkV1(value: number): number {
+  return (value & 31) | (((value >> 5) & 7) << HIGHLIGHT_COLOR_SHIFT);
+}
+
+/** An instrument, colour or size chosen for part of the text; empty fields use the document's. */
+export interface RunStyle {
+  penId?: string;
+  color?: string;
+  /** Letter size relative to the paragraph (1 = as it is). */
+  size?: number;
+}
+
+export function runStyleIndex(marks: number): number {
+  return (marks >>> STYLE_SHIFT) & 255;
+}
+
+export function withRunStyle(marks: number, index: number): number {
+  return (marks & ~(255 << STYLE_SHIFT)) | ((index & 255) << STYLE_SHIFT);
+}
+
+export function sameRunStyle(a: RunStyle, b: RunStyle): boolean {
+  return a.penId === b.penId && a.color === b.color && (a.size ?? 1) === (b.size ?? 1);
+}
+
+/**
+ * Applies a change of instrument, colour or size to a range. The table of
+ * run styles grows as needed (index 0 = the document's own); returns the new
+ * marks and table.
+ */
+export function applyRunStyle(
+  marks: number[],
+  styles: RunStyle[],
+  start: number,
+  end: number,
+  change: RunStyle,
+): { marks: number[]; styles: RunStyle[] } {
+  let table = styles.slice();
+  let next = marks.slice();
+  const cache = new Map<number, number>();
+  const indexOf = (style: RunStyle): number => {
+    const clean: RunStyle = {};
+    if (style.penId) clean.penId = style.penId;
+    if (style.color) clean.color = style.color;
+    if (style.size && Math.abs(style.size - 1) > 1e-6) clean.size = style.size;
+    if (!clean.penId && !clean.color && !clean.size) return 0;
+    const found = table.findIndex((s) => sameRunStyle(s, clean));
+    if (found >= 0) return found + 1;
+    if (table.length >= MAX_RUN_STYLES) {
+      // Full: drop the styles no character uses any more, then try again.
+      const compacted = compactRunStyles(next, table);
+      next = compacted.marks;
+      table = compacted.styles;
+      cache.clear();
+      if (table.length >= MAX_RUN_STYLES) return 0;
+    }
+    table.push(clean);
+    return table.length;
+  };
+  for (let i = start; i < end; i++) {
+    const old = runStyleIndex(next[i] ?? 0);
+    let index = cache.get(old);
+    if (index === undefined) {
+      const base = old > 0 ? table[old - 1] ?? {} : {};
+      index = indexOf({ ...base, ...change });
+      cache.set(old, index);
+    }
+    next[i] = withRunStyle(next[i] ?? 0, index);
+  }
+  return { marks: next, styles: table };
+}
+
+/** Removes run styles nobody uses and renumbers the rest. */
+export function compactRunStyles(marks: number[], styles: RunStyle[]): { marks: number[]; styles: RunStyle[] } {
+  const used = new Map<number, number>();
+  const table: RunStyle[] = [];
+  const next = marks.map((m) => {
+    const old = runStyleIndex(m);
+    if (old === 0 || !styles[old - 1]) return withRunStyle(m, 0);
+    let index = used.get(old);
+    if (index === undefined) {
+      table.push(styles[old - 1]);
+      index = table.length;
+      used.set(old, index);
+    }
+    return withRunStyle(m, index);
+  });
+  return { marks: next, styles: table };
+}
 
 export const HIGHLIGHT_COLORS = [
   { id: "yellow", label: "Amarillo", value: "#f5e03a" },
@@ -145,10 +241,17 @@ export function rangeHasMark(text: string, marks: number[], start: number, end: 
 export function setMark(marks: number[], start: number, end: number, flag: number, on: boolean, highlightColor = 0): number[] {
   const next = marks.slice();
   for (let i = start; i < end; i++) {
-    let value = on ? next[i] | flag : next[i] & ~flag;
+    let value = on ? next[i] | flag : next[i] & ~(flag & FLAGS);
     if (flag === HIGHLIGHT && on) value = withHighlightColor(value, highlightColor);
     next[i] = value;
   }
+  return next;
+}
+
+/** Removes every flag and the highlighter, keeping the instrument, colour and size. */
+export function clearFlags(marks: number[], start: number, end: number): number[] {
+  const next = marks.slice();
+  for (let i = start; i < end; i++) next[i] = next[i] & ~(FLAGS | (7 << HIGHLIGHT_COLOR_SHIFT));
   return next;
 }
 

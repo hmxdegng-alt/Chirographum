@@ -11,9 +11,9 @@
 import { resample, type Sample } from "./geometry";
 import type { Hand } from "./hand";
 import { glyphPointToPage, type Decoration, type LayoutResult } from "./layout";
-import type { PenModel } from "./pens";
+import { PENCIL_COLOR, penById, type PenModel } from "./pens";
 import { createRng, deriveSeed, type Rng } from "./random";
-import { HIGHLIGHT_COLORS } from "./rich-text";
+import { HIGHLIGHT_COLORS, type RunStyle } from "./rich-text";
 import { paperFirstLine, paperRuling, type Naturalness, type PageSettings, type PaperSettings } from "./settings";
 
 export interface RenderOptions {
@@ -35,6 +35,8 @@ export interface RenderOptions {
   paper?: PaperSettings;
   /** Draw the paper's lines (always on screen; when printing, only if the user wants them). */
   drawPaper?: boolean;
+  /** Instruments and colours chosen for parts of the text (glyph.style points here). */
+  runStyles?: RunStyle[];
 }
 
 /** Pixel box around all the ink of the page, or null for an empty page. */
@@ -473,6 +475,7 @@ const HIGHLIGHTER: PenModel = {
  * little, is never perfectly straight and lightens where the pen lifts.
  */
 function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
+  if (d.kind === "scribble") return scribble(d, pxPerMm);
   const rng = createRng(d.seed);
   const xh = d.xhMm;
   const length = Math.max(0.5, d.x1 - d.x0);
@@ -497,6 +500,53 @@ function handLine(d: Decoration, pxPerMm: number): { x: number; y: number; p: nu
 }
 
 const DEG = Math.PI / 180;
+
+/**
+ * Blotting out a mistake: a fast scribble back and forth over the word until
+ * it is covered, the way people do it in a hurry. Leaning strokes with
+ * rounded turns, never two the same height.
+ */
+function scribble(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
+  const rng = createRng(d.seed);
+  const xh = d.xhMm;
+  const left = d.x0 - (0.08 + 0.15 * rng.next()) * xh;
+  const right = d.x1 + (0.1 + 0.2 * rng.next()) * xh;
+  const middle = -0.5 * xh;
+  const half = 0.66 * xh;
+  const lean = 0.22 + 0.18 * rng.next();
+  // Far enough apart to see the strokes; the way back crosses the way there.
+  const stroke = (0.3 + 0.08 * rng.next()) * xh;
+  const samples = 6;
+  const baselineAt = (x: number) => d.y0 + ((d.y1 - d.y0) * (x - d.x0)) / Math.max(0.01, d.x1 - d.x0);
+  // A triangle wave with soft turns: straight strokes, quick round ends.
+  const SOFT = 0.94;
+  const wave = (k: number) => Math.asin(SOFT * Math.cos(Math.PI * k)) / Math.asin(SOFT);
+  const points: { x: number; y: number; p: number }[] = [];
+  for (const [from, to, phase, passLean] of [
+    [left, right, 0, lean],
+    [right, left, 0.5, lean - 0.3 - 0.15 * rng.next()],
+  ] as const) {
+    const strokes = Math.max(2, Math.round(Math.abs(to - from) / stroke));
+    const heights = Array.from({ length: strokes + 2 }, () => 0.75 + 0.4 * rng.next());
+    const centres = Array.from({ length: strokes + 2 }, () => (rng.next() - 0.5) * 0.2 * xh);
+    const total = strokes * samples;
+    for (let s = 0; s <= total; s++) {
+      const k = s / samples;
+      const i = Math.floor(k);
+      const f = k - i;
+      const ease = f * f * (3 - 2 * f);
+      const height = heights[i] + (heights[i + 1] - heights[i]) * ease;
+      const centre = centres[i] + (centres[i + 1] - centres[i]) * ease;
+      const rise = wave(k + phase) * half * height;
+      const along = from + ((to - from) * s) / total;
+      const x = along + rise * passLean;
+      const y = baselineAt(along) + middle + centre - rise;
+      // Pressing a little harder on the longer strokes.
+      points.push({ x: x * pxPerMm, y: y * pxPerMm, p: 0.8 + 0.45 * (height - 0.75) });
+    }
+  }
+  return points;
+}
 
 /** Translucent marker strokes on a layer of their own (layers stacked so overlaps darken). */
 function renderMarkerStrokes(
@@ -598,33 +648,56 @@ export function renderPage(
   ctx.globalCompositeOperation = "source-over";
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const widthScale = options.widthScale ?? 1;
+  const runStyles = options.runStyles ?? [];
+
+  /** Instrument and colour of a run style (0 = the document's). */
+  interface InkGroup {
+    pen: PenModel;
+    color: string;
+    strokes: StrokeGeometry[];
+  }
+  const groups = new Map<string, InkGroup>();
+  const groupFor = (style: number): InkGroup => {
+    const run = style > 0 ? runStyles[style - 1] : undefined;
+    const groupPen = run?.penId ? penById(run.penId) : pen;
+    const color = groupPen.kind === "pencil" ? PENCIL_COLOR : (run?.color ?? options.color);
+    const key = `${groupPen.id}|${color}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { pen: groupPen, color, strokes: [] };
+      groups.set(key, group);
+    }
+    return group;
+  };
 
   // Geometry of every stroke on this page: letters (bold ones twice) and hand-drawn lines.
-  const strokes: StrokeGeometry[] = [];
   const highlights: { geometry: StrokeGeometry; color: number }[] = [];
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  const include = (g: StrokeGeometry) => {
-    const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx(options) * 3 + 2;
+  let strokeCount = 0;
+  const include = (group: InkGroup, g: StrokeGeometry) => {
+    const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx({ ...options, pen: group.pen }) * 3 + 2;
     for (const sample of g.samples) {
       minX = Math.min(minX, sample.x - pad);
       minY = Math.min(minY, sample.y - pad);
       maxX = Math.max(maxX, sample.x + pad);
       maxY = Math.max(maxY, sample.y + pad);
     }
-    strokes.push(g);
+    group.strokes.push(g);
+    strokeCount++;
   };
   for (const glyph of layout.glyphs) {
     if (glyph.page !== options.pageIndex) continue;
     const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
     if (!variant) continue;
+    const group = groupFor(glyph.style ?? 0);
     // Bold: the writer goes over the letter again, a hair off the first pass.
     const passes = glyph.bold ? 2 : 1;
     const boldRng = createRng(deriveSeed(glyph.seed, "bold"));
     const angle = boldRng.next() * Math.PI * 2;
-    const shift = pen.widthMm * widthScale * (0.45 + 0.2 * boldRng.next()) * pxPerMm;
+    const shift = group.pen.widthMm * widthScale * (0.45 + 0.2 * boldRng.next()) * pxPerMm;
     for (let pass = 0; pass < passes; pass++) {
       const dx = pass === 0 ? 0 : Math.cos(angle) * shift;
       const dy = pass === 0 ? 0 : Math.sin(angle) * shift;
@@ -635,7 +708,7 @@ export function renderPage(
           const mapped = glyphPointToPage(glyph, page.xHeightMm, point.x, point.y);
           return { x: mapped.x * pxPerMm + dx, y: mapped.y * pxPerMm + dy, p: point.p };
         });
-        include(strokeGeometry(points, rng, pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)));
+        include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)));
       });
     }
   }
@@ -647,10 +720,69 @@ export function renderPage(
       const tip = { ...HIGHLIGHTER, widthMm: 1.35 * d.xhMm };
       highlights.push({ geometry: strokeGeometry(points, rng, tip, nat, pxPerMm, d.xhMm, 1), color: d.color });
     } else {
-      include(strokeGeometry(points, rng, pen, nat, pxPerMm, d.xhMm, widthScale));
+      const group = groupFor(d.style ?? 0);
+      include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, widthScale * (d.kind === "scribble" ? 1.15 : 1)));
     }
   }
 
+  const box = strokeCount > 0 ? clampBox({ x: minX, y: minY, width: maxX - minX, height: maxY - minY }, canvas.width, canvas.height) : null;
+
+  /** One instrument and colour: its ink, transparent around it, drawn into `target`; returns the box it used. */
+  const drawGroup = (target: CanvasRenderingContext2D, group: InkGroup): InkBox | null => {
+    const groupOptions = { ...options, pen: group.pen };
+    const style: InkStyle = {
+      color: group.color,
+      opacity: Math.max(0, Math.min(1, group.pen.opacity * (options.inkStrength ?? 1))),
+      onWhite: false,
+      printed: printedStrength(options),
+      pxPerMm,
+    };
+    const soft = softPx(groupOptions);
+    if (group.pen.buildsUp) {
+      // Markers: strokes that touch go to different layers, stacked translucent.
+      renderMarkerStrokes(target, group.strokes, groupOptions, style, soft);
+      return strokesBox(group.strokes, 3 + soft * 3, canvas.width, canvas.height);
+    }
+    const gb = strokesBox(group.strokes, soft * 3 + 2, canvas.width, canvas.height);
+    if (!gb) return null;
+    // Tone mask inside the ink box: black = no ink, white = full ink.
+    target.fillStyle = "#000000";
+    target.fillRect(gb.x, gb.y, gb.width, gb.height);
+    target.save();
+    target.beginPath();
+    target.rect(gb.x, gb.y, gb.width, gb.height);
+    target.clip();
+    target.globalCompositeOperation = "lighten";
+    for (const g of group.strokes) drawTone(target, g, 0, 0);
+    // Paper grain: the same paper under every stroke.
+    applyGrain(target, groupOptions, 0, 0, canvas.width, canvas.height);
+    target.restore();
+    // Soft edges (pencil, felt tips, printer ink spread), still on the opaque mask.
+    blurRegion(target, gb, soft);
+    target.globalCompositeOperation = "source-over";
+    toneToInk(target, gb, style);
+    return gb;
+  };
+
+  // 1. The ink. One instrument draws straight on the page; several each get a layer.
+  const inkGroups = [...groups.values()].filter((group) => group.strokes.length > 0);
+  if (inkGroups.length === 1) {
+    drawGroup(ctx, inkGroups[0]);
+  } else if (inkGroups.length > 1) {
+    const layer = createCanvas(canvas.width, canvas.height);
+    const lctx = layer.getContext("2d")!;
+    lctx.lineCap = "round";
+    lctx.lineJoin = "round";
+    for (const group of inkGroups) {
+      lctx.globalCompositeOperation = "source-over";
+      const used = drawGroup(lctx, group);
+      if (!used) continue;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.drawImage(layer, used.x, used.y, used.width, used.height, used.x, used.y, used.width, used.height);
+      lctx.clearRect(used.x, used.y, used.width, used.height);
+    }
+    layer.width = 0;
+  }
   const style: InkStyle = {
     color: options.color,
     opacity: Math.max(0, Math.min(1, pen.opacity * (options.inkStrength ?? 1))),
@@ -658,31 +790,6 @@ export function renderPage(
     printed: printedStrength(options),
     pxPerMm,
   };
-  const soft = softPx(options);
-  const box = strokes.length > 0 ? clampBox({ x: minX, y: minY, width: maxX - minX, height: maxY - minY }, canvas.width, canvas.height) : null;
-
-  // 1. The ink, transparent around it.
-  if (box && pen.buildsUp) {
-    // Markers: strokes that touch go to different layers, stacked translucent.
-    renderMarkerStrokes(ctx, strokes, options, style, soft);
-  } else if (box) {
-    // Tone mask inside the ink box: black = no ink, white = full ink.
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(box.x, box.y, box.width, box.height);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(box.x, box.y, box.width, box.height);
-    ctx.clip();
-    ctx.globalCompositeOperation = "lighten";
-    for (const g of strokes) drawTone(ctx, g, 0, 0);
-    // Paper grain: the same paper under every stroke.
-    applyGrain(ctx, options, 0, 0, canvas.width, canvas.height);
-    ctx.restore();
-    // Soft edges (pencil, felt tips, printer ink spread), still on the opaque mask.
-    blurRegion(ctx, box, soft);
-    ctx.globalCompositeOperation = "source-over";
-    toneToInk(ctx, box, style);
-  }
 
   // 2. Highlighter behind the ink (dark ink shows through it, as on paper).
   let fullBox = box;
@@ -726,7 +833,7 @@ export function renderPage(
   if (options.background === "white") {
     ctx.save();
     ctx.globalCompositeOperation = "destination-over";
-    ctx.fillStyle = options.paper?.color === "cream" ? "#fbf6e6" : "#ffffff";
+    ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
   }

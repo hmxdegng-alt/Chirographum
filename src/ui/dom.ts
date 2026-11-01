@@ -1,4 +1,6 @@
-// Minimal DOM helpers: the app has no UI framework in phase 0.
+// Minimal DOM helpers: the app has no UI framework.
+
+import { es } from "../i18n/es";
 
 type Attributes = Record<string, string | number | boolean | undefined>;
 type Child = Node | string | null | undefined | false;
@@ -22,6 +24,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+/** Text as the settings search compares it: lower case, without accents. */
+export function searchKey(text: string): string {
+  return text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
 export function button(label: string, onClick: () => void, variant: "primary" | "secondary" | "ghost" = "secondary"): HTMLButtonElement {
   const element = h("button", { class: `btn btn-${variant}`, type: "button" }, label);
   element.addEventListener("click", onClick);
@@ -36,6 +43,10 @@ export interface SliderOptions {
   value: number;
   format: (value: number) => string;
   onInput: (value: number) => void;
+  /** Value to go back to with the reset button (shown only when different). */
+  defaultValue?: number;
+  /** Extra words the settings search should find it by. */
+  search?: string;
 }
 
 export function slider(options: SliderOptions): { root: HTMLElement; set: (value: number) => void } {
@@ -48,17 +59,42 @@ export function slider(options: SliderOptions): { root: HTMLElement; set: (value
     value: options.value,
     "aria-label": options.label,
   });
+  const reset = h("button", { type: "button", class: "reset-button", hidden: true }, "↺");
+  const showReset = (value: number) => {
+    if (options.defaultValue === undefined) return;
+    reset.hidden = Math.abs(value - options.defaultValue) < options.step / 2;
+  };
+  if (options.defaultValue !== undefined) {
+    const label = es.panel.resetValue(options.format(options.defaultValue));
+    reset.title = label;
+    reset.setAttribute("aria-label", label);
+    reset.addEventListener("click", (event) => {
+      event.preventDefault();
+      input.value = String(options.defaultValue);
+      output.textContent = options.format(options.defaultValue!);
+      showReset(options.defaultValue!);
+      options.onInput(options.defaultValue!);
+    });
+  }
   input.addEventListener("input", () => {
     const value = Number(input.value);
     output.textContent = options.format(value);
+    showReset(value);
     options.onInput(value);
   });
-  const root = h("label", { class: "slider" }, h("span", { class: "slider-head" }, h("span", {}, options.label), output), input);
+  showReset(options.value);
+  const root = h(
+    "label",
+    { class: "slider", "data-search": searchKey(`${options.label} ${options.search ?? ""}`) },
+    h("span", { class: "slider-head" }, h("span", {}, options.label), h("span", { class: "slider-right" }, reset, output)),
+    input,
+  );
   return {
     root,
     set(value: number) {
       input.value = String(value);
       output.textContent = options.format(value);
+      showReset(value);
     },
   };
 }

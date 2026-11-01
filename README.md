@@ -6,15 +6,17 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 
 *A text editor that writes and prints in your own handwriting. Free and open source (AGPL-3.0). Interface in Spanish until version 1.0.*
 
-## Estado: Fase 1 completa · versión de prueba
+## Estado: Fase 2 en marcha · versión de prueba
 
 - **Tu letra:** dibuja con el ratón, el trackpad o un lápiz digital cada letra varias veces. Cada letra aparece en varios huecos con una letra fantasma de guía; pulsa **Intro** para guardarlos todos. Con **Ctrl + rueda** haces zoom.
 - **Hoja:** haz clic en la hoja y escribe directamente, como en un procesador de textos: cursor, selección con el ratón, flechas, Inicio/Fin, copiar, pegar y deshacer. Cuando una página se llena, el texto sigue en la siguiente. Cada letra conserva su dibujo mientras escribes alrededor (si te gusta el efecto de «letras vivas», actívalo en *Ver › Animaciones mientras se escribe*).
-- **Formato, como en un procesador de textos** (barra de herramientas, menú *Formato* y atajos): estilos Texto normal, Título, Subtítulo y Encabezados 1 a 3; negrita (la letra repasada), cursiva (más inclinada), subrayado y tachado dibujados a mano, resaltado con fosforito de cinco colores y alineación a la izquierda, centro o derecha. Deshacer y rehacer incluyen el formato.
+- **Formato, como en un procesador de textos** (barra de herramientas, menú *Formato* y atajos): estilos Texto normal, Título, Subtítulo y Encabezados 1 a 3; negrita (la letra repasada), cursiva (más inclinada), subrayado y tachado dibujados a mano, resaltado con fosforito de cinco colores, tachón a rayajos para tapar una palabra y alineación a la izquierda, centro o derecha. Deshacer y rehacer incluyen el formato.
+- **Solo lo seleccionado:** cambia el instrumento, el color de la tinta o el tamaño de unas pocas palabras desde la barra de herramientas; el panel de la derecha fija los del documento entero. Los estilos de párrafo (título, encabezados) y la alineación van por párrafo, como en Word o Google Docs.
 - **Regla** sobre la hoja con los márgenes izquierdo y derecho arrastrables.
-- **Papel:** folio en blanco, rayado, cuadrícula de 4 y 5 mm o punteado, con margen rojo y papel crema opcionales; el texto se apoya en las rayas. Las líneas se imprimen o, si escribes sobre un cuaderno real, solo se ven en pantalla.
+- **Papel:** folio en blanco, rayado, cuadrícula de 4 y 5 mm o punteado, con margen rojo opcional; el texto se apoya en las rayas. Las líneas se imprimen o, si escribes sobre un cuaderno real, solo se ven en pantalla.
 - **Instrumentos:** gel 0,7 y 0,5, bola, rotulador fino y mediano (la tinta se oscurece al cruzarse, como en la realidad), lápiz HB, lápiz 3H y portaminas. Ajustados con escaneos de escritura real.
-- **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, y un botón **Aleatorio**.
+- **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, un botón **Aleatorio** y un deslizador que sube o baja todas las imperfecciones a la vez (los ajustes de cada una están en *Ajustes avanzados*).
+- **Panel de ajustes** por secciones plegables, con buscador. Cada deslizador tiene un botón ↺ para volver a su valor por defecto y cada sección un botón **Restablecer**.
 - **Vista impresa** (botón sobre la hoja o menú *Ver*): imita cómo deja la tinta una impresora de chorro, calibrada con el escaneo de una hoja impresa.
 - **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp), todas las páginas.
 - **Documentos** `.chiro` (menú *Archivo*): nuevo, abrir, guardar y guardar como (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Mayús+S). Guardan el texto, el dibujo exacto de cada letra y todos los ajustes de la hoja; se escriben con la mano que tengas cargada. Si cierras con cambios sin guardar, el programa te pregunta. Doble clic en un `.chiro` lo abre.

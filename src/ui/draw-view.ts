@@ -69,8 +69,10 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
   let slotWidth = MIN_WIDTH - 2 * SIDE_PAD;
   let canvasWidth = MIN_WIDTH;
   let referenceWidth = X_HEIGHT_PX;
-  let smoothing = loadPreference("draw.smoothing", 0.5);
-  let thickness = loadPreference("draw.thickness", 5);
+  const DEFAULT_SMOOTHING = 0.5;
+  const DEFAULT_THICKNESS = 5;
+  let smoothing = loadPreference("draw.smoothing", DEFAULT_SMOOTHING);
+  let thickness = loadPreference("draw.thickness", DEFAULT_THICKNESS);
   let simulatePressure = loadPreference("draw.simulatePressure", true);
   let showReference = loadPreference("draw.showReference", true);
   let redrawQueued = false;
@@ -191,6 +193,7 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     max: 1,
     step: 0.05,
     value: smoothing,
+    defaultValue: DEFAULT_SMOOTHING,
     format: (v) => `${Math.round(v * 100)} %`,
     onInput: (v) => {
       smoothing = v;
@@ -203,6 +206,7 @@ export function createDrawView(store: Store): { root: HTMLElement; onShow: () =>
     max: 14,
     step: 1,
     value: thickness,
+    defaultValue: DEFAULT_THICKNESS,
     format: (v) => `${v} px`,
     onInput: (v) => {
       thickness = v;

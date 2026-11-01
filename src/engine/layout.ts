@@ -6,7 +6,20 @@
 
 import { variantBounds, type Hand } from "./hand";
 import { clampedGauss, createRng, deriveSeed, hashString } from "./random";
-import { BOLD, decodeParagraph, HIGHLIGHT, highlightColorIndex, ITALIC, STRIKE, STYLE_LOOK, UNDERLINE, type Alignment } from "./rich-text";
+import {
+  BOLD,
+  decodeParagraph,
+  HIGHLIGHT,
+  highlightColorIndex,
+  ITALIC,
+  runStyleIndex,
+  SCRIBBLE,
+  STRIKE,
+  STYLE_LOOK,
+  UNDERLINE,
+  type Alignment,
+  type RunStyle,
+} from "./rich-text";
 import { paperFirstLine, paperRuling, type Naturalness, type PageSettings, type PaperSettings } from "./settings";
 
 export interface PlacedGlyph {
@@ -34,11 +47,13 @@ export interface PlacedGlyph {
   widthMm: number;
   /** Bold: the writer goes over the letter a second time. */
   bold: boolean;
+  /** Run style (instrument, colour, size) of the letter; 0 = the document's. */
+  style: number;
 }
 
 /** A line drawn by hand over the text: underline, strikethrough or highlighter. */
 export interface Decoration {
-  kind: "underline" | "strike" | "highlight";
+  kind: "underline" | "strike" | "highlight" | "scribble";
   page: number;
   x0: number;
   y0: number;
@@ -48,6 +63,8 @@ export interface Decoration {
   xhMm: number;
   /** Highlighter colour (index in HIGHLIGHT_COLORS). */
   color: number;
+  /** Run style of the words it is drawn on (instrument and colour). */
+  style: number;
   seed: number;
 }
 
@@ -60,6 +77,8 @@ export interface LayoutFormat {
   paper?: PaperSettings;
   /** Titles get a line drawn under them. */
   titleUnderline?: boolean;
+  /** Instruments, colours and sizes chosen for parts of the text. */
+  runStyles?: RunStyle[];
 }
 
 /** Where the text cursor stands before a character (or after the last one). */
@@ -108,6 +127,7 @@ interface GlyphPlan {
   seed: number;
   index: number;
   bold: boolean;
+  style: number;
 }
 
 interface WordToken {
@@ -154,6 +174,7 @@ function planGlyphs(
   text: string,
   ids: number[],
   marks: number[],
+  runStyles: RunStyle[],
   hand: Hand,
   nat: Naturalness,
   seed: number,
@@ -190,12 +211,14 @@ function planGlyphs(
     const bounds = variantBounds(variants[final]);
     const mark = marks[index] ?? 0;
     const italic = mark & ITALIC ? ITALIC_SLANT : 0;
+    const style = runStyleIndex(mark);
+    const runSize = style > 0 ? runStyles[style - 1]?.size ?? 1 : 1;
     return {
       char,
       variantIndex: final,
       width: Math.max(0.05, bounds.maxX - bounds.minX),
       offsetX: -bounds.minX,
-      size: Math.max(0.25, Math.min(3, 1 + z[0] * 0.09 * nat.sizeVariation)),
+      size: Math.max(0.25, Math.min(3, 1 + z[0] * 0.09 * nat.sizeVariation)) * runSize,
       rotation: z[1] * 4 * DEG * nat.rotation,
       slant: Math.tan(Math.max(-75, Math.min(75, nat.slantDegrees + italic + z[2] * 7 * nat.slantVariation)) * DEG),
       lift: z[3] * 0.07 * nat.baselineWobble,
@@ -203,6 +226,7 @@ function planGlyphs(
       seed: deriveSeed(seed, "ink", id),
       index,
       bold: Boolean(mark & BOLD),
+      style,
     };
   };
 
@@ -239,6 +263,8 @@ interface LineState {
   page: number;
   /** Letter size of the line's paragraph (1 = normal text). */
   scale: number;
+  /** Size that decides the distance to the neighbouring lines (bigger words included). */
+  spacingScale: number;
   align: Alignment;
   /** Where this line's glyphs, gaps and cursor stops start, to move them when centring. */
   firstGlyph: number;
@@ -271,7 +297,23 @@ export function layoutText(
   const marks = format.marks && format.marks.length === text.length ? format.marks : [];
   const paragraphFormats = format.paragraphs ?? [];
   const paragraphOf = (p: number) => decodeParagraph(paragraphFormats[p] ?? 0);
-  const { tokens, missing } = planGlyphs(text, ids, marks, hand, nat, seed);
+  const runStyles = format.runStyles ?? [];
+  const { tokens, missing } = planGlyphs(text, ids, marks, runStyles, hand, nat, seed);
+  // Bigger words chosen by the user push the lines of their paragraph apart.
+  const paragraphRunSize: number[] = [];
+  {
+    let p = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10) {
+        p++;
+        continue;
+      }
+      const style = runStyleIndex(marks[i] ?? 0);
+      const size = style > 0 ? runStyles[style - 1]?.size ?? 1 : 1;
+      paragraphRunSize[p] = Math.max(paragraphRunSize[p] ?? 1, size);
+    }
+  }
+  const lineScaleOf = (paragraph: number) => STYLE_LOOK[paragraphOf(paragraph).style].scale * Math.max(1, paragraphRunSize[paragraph] ?? 1);
   const baseXh = page.xHeightMm;
   const ruling = format.paper ? paperRuling(format.paper) : null;
   const rulingStart = format.paper ? paperFirstLine(format.paper) : 0;
@@ -284,8 +326,7 @@ export function layoutText(
     while (rulingStart + k * ruling < after + ruling * 0.5) k++;
     return rulingStart + k * ruling;
   };
-  const firstStyle = STYLE_LOOK[paragraphOf(0).style];
-  const firstBaselineMm = snap(page.marginTopMm + baseXh * firstStyle.scale * 2.1);
+  const firstBaselineMm = snap(page.marginTopMm + baseXh * lineScaleOf(0) * 2.1);
   const overflowToleranceMm = 1.2 + nat.edgeShrink * 2.5;
   const glyphs: PlacedGlyph[] = [];
   const missingBoxes: MissingBox[] = [];
@@ -315,6 +356,7 @@ export function layoutText(
       index,
       page: pageIndex,
       scale: STYLE_LOOK[format.style].scale,
+      spacingScale: lineScaleOf(paragraph),
       align: format.align,
       firstGlyph: glyphs.length,
       firstGap: missingBoxes.length,
@@ -368,6 +410,7 @@ export function layoutText(
         index: plan.index,
         widthMm,
         bold: plan.bold,
+        style: plan.style,
       });
       x += widthMm + page.letterSpacing * baseXh * scale * (1 + plan.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
     });
@@ -412,9 +455,9 @@ export function layoutText(
     lineIndex++;
     const rng = createRng(deriveSeed(seed, "spacing", key));
     const previous = line;
-    const nextScale = STYLE_LOOK[paragraphOf(paragraph).style].scale;
+    const nextScale = lineScaleOf(paragraph);
     // From the bottom of this line's letters to the top of the next ones.
-    let pitch = page.lineSpacingMm * (0.45 * previous.scale + 0.55 * nextScale);
+    let pitch = page.lineSpacingMm * (0.45 * previous.spacingScale + 0.55 * nextScale);
     if (newParagraph) {
       pitch += page.lineSpacingMm * (STYLE_LOOK[paragraphOf(paragraph - 1).style].after + STYLE_LOOK[paragraphOf(paragraph).style].before);
     }
@@ -482,7 +525,7 @@ export function layoutText(
   finishLine();
   for (let i = 0; i < carets.length; i++) if (!carets[i]) carets[i] = carets[i + 1] ?? carets[i - 1];
 
-  const decorations = decorate(text, ids, marks, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed);
+  const decorations = decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed);
   return { glyphs, missing, missingBoxes, decorations, carets, pageCount: pageIndex + 1, overflow, lineCount: lineIndex + 1 };
 }
 
@@ -495,6 +538,7 @@ function decorate(
   text: string,
   ids: number[],
   marks: number[],
+  runStyles: RunStyle[],
   paragraphs: number[],
   titleUnderline: boolean,
   carets: CaretStop[],
@@ -518,7 +562,9 @@ function decorate(
     ["highlight", HIGHLIGHT],
     ["underline", UNDERLINE],
     ["strike", STRIKE],
+    ["scribble", SCRIBBLE],
   ];
+  const styleAt = (i: number) => runStyleIndex(marks[i] ?? 0);
   for (const [kind, flag] of kinds) {
     let i = 0;
     while (i < text.length) {
@@ -528,7 +574,9 @@ function decorate(
       }
       // A run: same flag, same line, no line break.
       let j = i;
-      while (j + 1 < text.length && effective(j + 1) & flag && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line) j++;
+      // A line is drawn with one pen: a change of instrument or colour starts a new one.
+      const sameInk = (k: number) => kind === "highlight" || styleAt(k) === styleAt(i) || /\s/.test(text[k]);
+      while (j + 1 < text.length && effective(j + 1) & flag && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line && sameInk(j + 1)) j++;
       let a = i;
       let b = j;
       while (a <= b && /\s/.test(text[a])) a++;
@@ -539,7 +587,8 @@ function decorate(
         const endX = last ? last.xMm + last.widthMm : (carets[b + 1]?.line === start.line ? carets[b + 1].xMm : carets[b].xMm + baseXh * 0.6);
         const endStop = carets[b];
         const slope = endStop.xMm !== start.xMm ? (endStop.yMm - start.yMm) / (endStop.xMm - start.xMm) : 0;
-        const scale = STYLE_LOOK[decodeParagraph(paragraphs[paragraphAt[a]] ?? 0).style].scale;
+        const runSize = styleAt(a) > 0 ? runStyles[styleAt(a) - 1]?.size ?? 1 : 1;
+        const scale = STYLE_LOOK[decodeParagraph(paragraphs[paragraphAt[a]] ?? 0).style].scale * runSize;
         result.push({
           kind,
           page: start.page,
@@ -549,6 +598,7 @@ function decorate(
           y1: start.yMm + slope * (endX - start.xMm),
           xhMm: baseXh * scale,
           color: highlightColorIndex(marks[a] ?? 0),
+          style: styleAt(a),
           seed: deriveSeed(seed, kind, ids[a] ?? a),
         });
       }

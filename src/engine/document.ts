@@ -2,7 +2,7 @@
 // (so it looks exactly the same when opened again) and the sheet settings.
 // It is written with whatever hand is loaded; the hand is its own file.
 
-import { decodeBytes, encodeBytes, paragraphCount } from "./rich-text";
+import { compactRunStyles, decodeBytes, paragraphCount, upgradeMarkV1, type RunStyle } from "./rich-text";
 import { DEFAULT_PAPER, type Naturalness, type PageSettings, type PaperKind, type PaperSettings } from "./settings";
 
 export const DOCUMENT_FORMAT = "chirographum-document";
@@ -25,6 +25,8 @@ export interface SheetSettings {
   paper: PaperSettings;
   /** Titles get a line drawn under them. */
   titleUnderline: boolean;
+  /** Overall amount of imperfections (1 = the values as they are). */
+  naturalnessAmount: number;
 }
 
 export interface ChiroDocument {
@@ -34,6 +36,8 @@ export interface ChiroDocument {
   marks: number[];
   /** Style and alignment of every paragraph. */
   paragraphs: number[];
+  /** Instruments, colours and sizes chosen for parts of the text (marks point here). */
+  runStyles: RunStyle[];
   settings: SheetSettings;
 }
 
@@ -63,14 +67,17 @@ export function decodeIds(encoded: string): number[] {
 }
 
 export function serializeDocument(doc: ChiroDocument): string {
+  // Styles no letter uses any more (after undo or a change of mind) are not saved.
+  const { marks, styles } = compactRunStyles(doc.marks, doc.runStyles);
   return JSON.stringify(
     {
       format: DOCUMENT_FORMAT,
       version: DOCUMENT_VERSION,
       text: doc.text,
       charIds: encodeIds(doc.charIds),
-      marks: encodeBytes(doc.marks),
+      marks32: encodeIds(marks),
       paragraphs: doc.paragraphs,
+      runStyles: styles,
       settings: doc.settings,
     },
     null,
@@ -108,13 +115,21 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
   if (charIds.length !== text.length) charIds = [];
 
   let marks: number[] = [];
-  if (typeof data.marks === "string") {
-    try {
-      marks = decodeBytes(data.marks);
-    } catch {
-      marks = [];
-    }
+  try {
+    if (typeof data.marks32 === "string") marks = decodeIds(data.marks32);
+    else if (typeof data.marks === "string") marks = decodeBytes(data.marks).map(upgradeMarkV1);
+  } catch {
+    marks = [];
   }
+  const runStyles: RunStyle[] = Array.isArray(data.runStyles)
+    ? data.runStyles.filter(isObject).map((r) => {
+        const style: RunStyle = {};
+        if (typeof r.penId === "string") style.penId = r.penId;
+        if (typeof r.color === "string" && /^#[0-9a-f]{6}$/i.test(r.color)) style.color = r.color;
+        if (typeof r.size === "number" && Number.isFinite(r.size)) style.size = Math.max(0.2, Math.min(5, r.size));
+        return style;
+      })
+    : [];
   if (marks.length !== text.length) marks = new Array<number>(text.length).fill(0);
   let paragraphs = Array.isArray(data.paragraphs) ? data.paragraphs.map((v) => (typeof v === "number" && Number.isFinite(v) ? v & 31 : 0)) : [];
   if (paragraphs.length !== paragraphCount(text)) paragraphs = new Array<number>(paragraphCount(text)).fill(0);
@@ -134,12 +149,13 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
       kind: kinds.includes(rawPaper.kind as PaperKind) ? (rawPaper.kind as PaperKind) : (defaults.paper ?? DEFAULT_PAPER).kind,
       lineSpacingMm: typeof rawPaper.lineSpacingMm === "number" ? rawPaper.lineSpacingMm : (defaults.paper ?? DEFAULT_PAPER).lineSpacingMm,
       marginLine: typeof rawPaper.marginLine === "boolean" ? rawPaper.marginLine : (defaults.paper ?? DEFAULT_PAPER).marginLine,
-      color: rawPaper.color === "cream" || rawPaper.color === "white" ? rawPaper.color : (defaults.paper ?? DEFAULT_PAPER).color,
       print: typeof rawPaper.print === "boolean" ? rawPaper.print : (defaults.paper ?? DEFAULT_PAPER).print,
     },
     titleUnderline: typeof raw.titleUnderline === "boolean" ? raw.titleUnderline : defaults.titleUnderline,
+    naturalnessAmount:
+      typeof raw.naturalnessAmount === "number" && Number.isFinite(raw.naturalnessAmount) ? Math.max(0, Math.min(3, raw.naturalnessAmount)) : defaults.naturalnessAmount,
   };
-  return { text, charIds, marks, paragraphs, settings };
+  return { text, charIds, marks, paragraphs, runStyles, settings };
 }
 
 /** File name without folder or extension, for the window title. */

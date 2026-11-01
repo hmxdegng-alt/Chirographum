@@ -90,7 +90,7 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
     async new() {
       if (!(await confirmDiscard())) return;
       // A blank page with the same pen and look, written in a new version.
-      show({ text: "", charIds: [], marks: [], paragraphs: [0], settings: { ...sheet.currentSettings(), seed: freshSeed() } }, null, null);
+      show({ text: "", charIds: [], marks: [], paragraphs: [0], runStyles: [], settings: { ...sheet.currentSettings(), seed: freshSeed() } }, null, null);
     },
     async open() {
       if (!(await confirmDiscard())) return;
@@ -122,7 +122,7 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
           // A damaged snapshot: keep what is there.
         }
       } else {
-        sheet.loadDocument({ text: "", charIds: [], marks: [], paragraphs: [0], settings: sheet.currentSettings() });
+        sheet.loadDocument({ text: "", charIds: [], marks: [], paragraphs: [0], runStyles: [], settings: sheet.currentSettings() });
       }
       dirty = false;
       update();

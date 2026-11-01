@@ -27,7 +27,6 @@ export interface PaperSettings {
   lineSpacingMm: number;
   /** Red margin line on the left. */
   marginLine: boolean;
-  color: "white" | "cream";
   /** Print the lines too; off = they are only a guide on screen (writing on a real notebook). */
   print: boolean;
 }
@@ -36,7 +35,6 @@ export const DEFAULT_PAPER: PaperSettings = {
   kind: "blank",
   lineSpacingMm: 8,
   marginLine: false,
-  color: "white",
   print: true,
 };
 
@@ -181,5 +179,15 @@ export function randomNaturalness(seed: number): Naturalness {
   // A gentle habit of writing uphill or downhill; the pen never skips by chance.
   result.lineSlope = Math.round((rng.next() * 2 - 1) * 10) / 10;
   result.inkSkips = 0;
+  return result;
+}
+
+/** Imperfections scaled by the overall "Naturalidad" amount (slant is the writer's, it stays). */
+export function scaledNaturalness(values: Naturalness, amount: number): Naturalness {
+  const result = { ...values };
+  for (const key of Object.keys(values) as (keyof Naturalness)[]) {
+    if (key === "slantDegrees") continue;
+    result[key] = values[key] * amount;
+  }
   return result;
 }

@@ -16,14 +16,20 @@ import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
 import { decodeIds, documentTitle, DocumentFormatError, encodeIds, parseDocument, serializeDocument } from "../src/engine/document";
 import { glyphPointToPage, layoutText } from "../src/engine/layout";
 import {
+  applyRunStyle,
   BOLD,
+  compactRunStyles,
   decodeBytes,
+  runStyleIndex,
+  upgradeMarkV1,
+  withRunStyle,
   decodeParagraph,
   encodeBytes,
   encodeParagraph,
   HIGHLIGHT,
   highlightColorIndex,
   rangeHasMark,
+  SCRIBBLE,
   setMark,
   UNDERLINE,
   updateMarks,
@@ -232,7 +238,7 @@ describe("layout", () => {
   });
 
   it("maps glyph points onto the page with y growing downwards", () => {
-    const glyph = { char: "a", variantIndex: 0, page: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1, index: 0, widthMm: 1, bold: false };
+    const glyph = { char: "a", variantIndex: 0, page: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1, index: 0, widthMm: 1, bold: false, style: 0 };
     expect(glyphPointToPage(glyph, 3, 0, 1)).toEqual({ x: 50, y: 97 });
   });
 });
@@ -291,8 +297,9 @@ describe("documents", () => {
     presetId: "normal",
     naturalness: presetById("normal").values,
     seed: 42,
-    paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, color: "white" as const, print: true },
+    paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, print: true },
     titleUnderline: true,
+    naturalnessAmount: 1,
   };
 
   it("keeps letter identities exactly", () => {
@@ -305,12 +312,27 @@ describe("documents", () => {
     const doc = {
       text: "Querida Marta:\n\n¿Cuándo vienes?",
       charIds: Array.from({ length: 31 }, (_, i) => (i * 2654435761) >>> 0),
-      marks: Array.from({ length: 31 }, (_, i) => (i % 5 === 0 ? BOLD | UNDERLINE : 0)),
+      marks: Array.from({ length: 31 }, (_, i) => withRunStyle(i % 5 === 0 ? BOLD | UNDERLINE : 0, i < 7 ? 1 : i > 20 ? 2 : 0)),
       paragraphs: [encodeParagraph({ style: "title", align: "center" }), 0, 0],
+      runStyles: [{ penId: "marker-medium", color: "#b42128" }, { size: 2 }],
       settings: { ...defaults, penId: "fineliner", seed: 7, page: { ...A4, xHeightMm: 4 }, paper: { ...defaults.paper, kind: "lined" as const } },
     };
     expect(doc.text.length).toBe(31);
     expect(parseDocument(serializeDocument(doc), defaults)).toEqual(doc);
+  });
+
+  it("does not save run styles no letter uses", () => {
+    const doc = {
+      text: "abc",
+      charIds: [1, 2, 3],
+      marks: [withRunStyle(0, 2), 0, withRunStyle(0, 2)],
+      paragraphs: [0],
+      runStyles: [{ penId: "marker-medium" }, { color: "#b42128" }],
+      settings: defaults,
+    };
+    const back = parseDocument(serializeDocument(doc), defaults);
+    expect(back.runStyles).toEqual([{ color: "#b42128" }]);
+    expect(back.marks.map(runStyleIndex)).toEqual([1, 0, 1]);
   });
 
   it("fills settings an older file does not have", () => {
@@ -403,8 +425,24 @@ describe("styled layout", () => {
     expect(u.x1).toBeGreaterThan(r.carets[11].xMm);
   });
 
+  it("a scribble covers only its word, and a coloured word gets its own underline", () => {
+    const text = "uno dos tres";
+    let marks: number[] = Array.from(text, (_, i) => (i >= 4 && i < 7 ? SCRIBBLE : UNDERLINE));
+    let runStyles: { color?: string }[] = [];
+    ({ marks, styles: runStyles } = applyRunStyle(marks, runStyles, 8, 12, { color: "#b42128" }));
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks, runStyles });
+    const scribbles = r.decorations.filter((d) => d.kind === "scribble");
+    expect(scribbles).toHaveLength(1);
+    expect(scribbles[0].x0).toBeCloseTo(r.carets[4].xMm, 5);
+    expect(scribbles[0].x1).toBeLessThan(r.carets[8].xMm);
+    const underlines = r.decorations.filter((d) => d.kind === "underline");
+    expect(underlines.map((d) => d.style)).toEqual([0, 1]);
+    expect(underlines[0].x1).toBeLessThan(r.carets[4].xMm);
+    expect(underlines[1].x0).toBeCloseTo(r.carets[8].xMm, 5);
+  });
+
   it("on lined paper every baseline sits on a line", () => {
-    const paper = { kind: "lined" as const, lineSpacingMm: 8, marginLine: false, color: "white" as const, print: true };
+    const paper = { kind: "lined" as const, lineSpacingMm: 8, marginLine: false, print: true };
     const r = layoutText("uno dos tres cuatro cinco ".repeat(30), hand, A4, nat, 3, undefined, { paper });
     const lines = new Set(r.carets.map((c) => c.line));
     for (const line of lines) {
@@ -412,5 +450,44 @@ describe("styled layout", () => {
       const k = (stop.yMm - 20) / 8;
       expect(Math.abs(k - Math.round(k))).toBeLessThan(0.15);
     }
+  });
+});
+
+describe("run styles (instrument, colour and size of a selection)", () => {
+  const hand = syntheticHand("unodstrecaiflhvz");
+  const nat = { ...presetById("normal").values, sizeVariation: 0 };
+
+  it("applies to the range only and reuses equal styles", () => {
+    let marks = [BOLD, 0, 0, 0, 0];
+    let styles: { penId?: string; color?: string; size?: number }[] = [];
+    ({ marks, styles } = applyRunStyle(marks, styles, 1, 3, { color: "#b42128" }));
+    expect(marks.map(runStyleIndex)).toEqual([0, 1, 1, 0, 0]);
+    expect(marks[0] & BOLD).toBe(BOLD);
+    ({ marks, styles } = applyRunStyle(marks, styles, 3, 5, { color: "#b42128" }));
+    expect(styles).toHaveLength(1);
+    ({ marks, styles } = applyRunStyle(marks, styles, 1, 2, { size: 2 }));
+    expect(styles[runStyleIndex(marks[1]) - 1]).toEqual({ color: "#b42128", size: 2 });
+    // Back to the document's: no style at all.
+    ({ marks, styles } = applyRunStyle(marks, styles, 0, 5, { color: undefined, size: 1 }));
+    expect(marks.map(runStyleIndex)).toEqual([0, 0, 0, 0, 0]);
+    expect(compactRunStyles(marks, styles).styles).toEqual([]);
+  });
+
+  it("bigger letters for a selected word only, and more room for its line", () => {
+    const text = "uno dos tres\ncuatro";
+    const plain = layoutText(text, hand, A4, nat, 1);
+    const { marks, styles } = applyRunStyle(new Array(text.length).fill(0), [], 4, 7, { size: 2 });
+    const big = layoutText(text, hand, A4, nat, 1, undefined, { marks, runStyles: styles });
+    const scale = (r: typeof plain, i: number) => r.glyphs.find((g) => g.index === i)!.scale;
+    expect(scale(big, 5) / scale(plain, 5)).toBeCloseTo(2, 5);
+    expect(scale(big, 0)).toBeCloseTo(scale(plain, 0), 5);
+    const secondLine = (r: typeof plain) => r.glyphs.find((g) => g.index === 13)!.yMm;
+    expect(secondLine(big)).toBeGreaterThan(secondLine(plain));
+  });
+
+  it("old documents keep their highlighter colour", () => {
+    const old = (2 << 5) | 16;
+    expect(highlightColorIndex(upgradeMarkV1(old))).toBe(2);
+    expect(upgradeMarkV1(old) & HIGHLIGHT).toBe(HIGHLIGHT);
   });
 });

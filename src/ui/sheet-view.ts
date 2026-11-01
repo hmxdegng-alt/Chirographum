@@ -10,7 +10,9 @@ import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, PENS, penById } from "../engi
 import { freshSeed, hashString } from "../engine/random";
 import { renderPage } from "../engine/render";
 import {
+  applyRunStyle,
   BOLD,
+  clearFlags,
   decodeParagraph,
   diffTexts,
   encodeParagraph,
@@ -20,13 +22,18 @@ import {
   paragraphCount,
   paragraphsInRange,
   rangeHasMark,
+  runStyleIndex,
+  SCRIBBLE,
   setMark,
   STRIKE,
   UNDERLINE,
   updateMarks,
   updateParagraphs,
+  upgradeMarkV1,
+  withRunStyle,
   type Alignment,
   type ParagraphStyle,
+  type RunStyle,
 } from "../engine/rich-text";
 import {
   A4,
@@ -35,6 +42,7 @@ import {
   PRESETS,
   presetById,
   randomNaturalness,
+  scaledNaturalness,
   type Naturalness,
   type PageSettings,
   type PaperKind,
@@ -44,7 +52,7 @@ import { es } from "../i18n/es";
 import type { Store } from "../store";
 import { onViewOptions, setViewOption, viewOptions } from "../view-options";
 import { createColorPopover } from "./color-picker";
-import { button, h, percent, slider, toast } from "./dom";
+import { button, h, percent, searchKey, slider, toast } from "./dom";
 import { createPageEditor } from "./page-editor";
 import { createRuler } from "./ruler";
 import { createToolbar } from "./toolbar";
@@ -76,6 +84,7 @@ interface Snapshot {
   ids: number[];
   marks: number[];
   paragraphs: number[];
+  runStyles: RunStyle[];
   start: number;
   end: number;
 }
@@ -162,9 +171,24 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   if (charIds.length !== initialText.length) charIds = defaultCharIds(initialText);
   let marks = loadPreference<number[]>("sheet.textMarks", []);
   if (marks.length !== initialText.length) marks = new Array<number>(initialText.length).fill(0);
+  // Version 0.1 kept the highlighter colour in other bits.
+  if (loadPreference("sheet.marksVersion", 1) < 2) {
+    marks = marks.map(upgradeMarkV1);
+    savePreference("sheet.marksVersion", 2);
+  }
+  /** Instruments, colours and sizes chosen for parts of the text. */
+  let runStyles = loadPreference<RunStyle[]>("sheet.runStyles", []);
+  let naturalnessAmount = loadPreference("sheet.naturalnessAmount", 1);
   let paragraphs = loadPreference<number[]>("sheet.paragraphs", []);
   if (paragraphs.length !== paragraphCount(initialText)) paragraphs = new Array<number>(paragraphCount(initialText)).fill(0);
-  let paper: PaperSettings = { ...DEFAULT_PAPER, ...loadPreference<Partial<PaperSettings>>("sheet.paper", {}) };
+  /** Only the fields the app knows (0.1 also kept a paper colour). */
+  const cleanPaper = (value: Partial<PaperSettings>): PaperSettings => ({
+    kind: value.kind ?? DEFAULT_PAPER.kind,
+    lineSpacingMm: value.lineSpacingMm ?? DEFAULT_PAPER.lineSpacingMm,
+    marginLine: value.marginLine ?? DEFAULT_PAPER.marginLine,
+    print: value.print ?? DEFAULT_PAPER.print,
+  });
+  let paper = cleanPaper(loadPreference<Partial<PaperSettings>>("sheet.paper", {}));
   let titleUnderline = loadPreference("sheet.titleUnderline", true);
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
@@ -182,7 +206,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     return 0;
   };
 
-  const snapshot = (start: number, end: number): Snapshot => ({ text: lastText, ids: charIds, marks, paragraphs, start, end });
+  const snapshot = (start: number, end: number): Snapshot => ({ text: lastText, ids: charIds, marks, paragraphs, runStyles, start, end });
 
   /** Saves the state before a change, so it can be undone. Typing in a row is one step. */
   const pushUndo = (before: Snapshot, typing: boolean) => {
@@ -214,6 +238,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     savePreference("sheet.textIds", charIds);
     savePreference("sheet.textMarks", marks);
     savePreference("sheet.paragraphs", paragraphs);
+    savePreference("sheet.runStyles", runStyles);
   };
   const saveTextSoon = () => {
     window.clearTimeout(textSaveTimer);
@@ -257,6 +282,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     charIds = state.ids;
     marks = state.marks;
     paragraphs = state.paragraphs;
+    runStyles = state.runStyles;
     pendingMarks = null;
     editor.setText(state.text, state.start, state.end);
     afterTextChange();
@@ -281,7 +307,30 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   }
 
   // ----- Formatting commands (toolbar, Formato menu, shortcuts) -----
-  const FLAGS: Record<string, number> = { bold: BOLD, italic: ITALIC, underline: UNDERLINE, strike: STRIKE, highlight: HIGHLIGHT };
+  const FLAGS: Record<string, number> = { bold: BOLD, italic: ITALIC, underline: UNDERLINE, strike: STRIKE, highlight: HIGHLIGHT, scribble: SCRIBBLE };
+
+  /** Instrument, colour or size for the selection (or for what is typed next). */
+  function changeRunStyle(change: RunStyle): void {
+    const { start, end } = editor.selection();
+    if (start === end) {
+      const result = applyRunStyle([marksAt(start)], runStyles, 0, 1, change);
+      runStyles = result.styles;
+      pendingMarks = result.marks[0];
+      updateToolbar();
+      return;
+    }
+    changeFormatting(() => {
+      const result = applyRunStyle(marks, runStyles, start, end, change);
+      marks = result.marks;
+      runStyles = result.styles;
+    });
+  }
+
+  /** The run style at the cursor or at the start of the selection. */
+  const runStyleAt = (index: number): RunStyle => {
+    const style = runStyleIndex(marksAt(index));
+    return style > 0 ? runStyles[style - 1] ?? {} : {};
+  };
 
   function changeFormatting(apply: () => void): void {
     const sel = editor.selection();
@@ -320,7 +369,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     else if (kind === "format" && value === "clear") {
       const { start, end } = editor.selection();
       if (start === end) pendingMarks = 0;
-      else changeFormatting(() => (marks = setMark(setMark(marks, start, end, 0xff, false), start, end, 0, false)));
+      else changeFormatting(() => (marks = clearFlags(marks, start, end).map((m, i) => (i >= start && i < end ? withRunStyle(m, 0) : m))));
       updateToolbar();
     } else if (kind === "format" && FLAGS[value]) toggleFlag(FLAGS[value]);
     else if (kind === "highlight") {
@@ -330,7 +379,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         savePreference("sheet.highlightColor", highlightColor);
         toggleFlag(HIGHLIGHT, highlightColor, true);
       }
-    } else if (kind === "style") setParagraphs((format) => ({ ...format, style: value as ParagraphStyle }));
+    } else if (kind === "pen") changeRunStyle({ penId: value === "default" ? undefined : value });
+    else if (kind === "ink") changeRunStyle({ color: value === "default" ? undefined : value });
+    else if (kind === "size") changeRunStyle({ size: Number(value) || 1 });
+    else if (kind === "style") setParagraphs((format) => ({ ...format, style: value as ParagraphStyle }));
     else if (kind === "align") setParagraphs((format) => ({ ...format, align: value as Alignment }));
     else return false;
     if (store.get().tab === "sheet") editor.focus();
@@ -363,7 +415,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     printedToggle.checked = options.printedLook;
     scheduleRender(0);
   });
-  const toolbar = createToolbar((command) => void runCommand(command), [zoom.bar, printedLabel]);
+  const toolbar = createToolbar((command) => void runCommand(command), [zoom.bar, printedLabel], () => inkColor);
   const ruler = createRuler({
     pageGeometry: () => {
       const first = editor.pages().find((canvas) => {
@@ -409,6 +461,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       underline: has(UNDERLINE),
       strike: has(STRIKE),
       highlight: has(HIGHLIGHT),
+      scribble: has(SCRIBBLE),
+      penId: runStyleAt(start).penId ?? "default",
+      inkColor: runStyleAt(start).color ?? null,
+      size: runStyleAt(start).size ?? 1,
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
@@ -482,6 +538,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       max,
       step: 0.01,
       value: penTuning[key],
+      defaultValue: 1,
       format: percent,
       onInput: (value) => {
         penTuning = { ...penTuning, [key]: value };
@@ -493,13 +550,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Spacing is stored in x-heights; shown in millimetres at the current letter size. */
   const spacingFormat = (value: number) => mmFormat(value * page.xHeightMm);
 
-  const pageSlider = (label: string, key: keyof PageSettings, min: number, max: number, step: number, format = mmFormat) =>
+  const pageSlider = (label: string, key: keyof PageSettings, min: number, max: number, step: number, format = mmFormat, search?: string) =>
     remembered(pageSetters, key, slider({
       label,
+      search,
       min,
       max,
       step,
       value: page[key],
+      defaultValue: A4[key],
       format,
       onInput: (value) => {
         page = { ...page, [key]: value };
@@ -526,6 +585,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       label: es.sheet.sliders[key],
       ...range,
       value: naturalness[key],
+      defaultValue: presetById(DEFAULT_PRESET_ID).values[key],
       onInput: (value) => {
         naturalness = { ...naturalness, [key]: value };
         presetId = "custom";
@@ -585,16 +645,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     max: 12,
     step: 0.5,
     value: paper.lineSpacingMm,
+    defaultValue: DEFAULT_PAPER.lineSpacingMm,
     format: mmFormat,
     onInput: (value) => setPaper({ lineSpacingMm: value }),
   });
   const marginLine = h("input", { type: "checkbox" });
-  const creamPaper = h("input", { type: "checkbox" });
   const printPaper = h("input", { type: "checkbox" });
   const titleLine = h("input", { type: "checkbox" });
   paperSelect.addEventListener("change", () => setPaper({ kind: paperSelect.value as PaperKind }));
   marginLine.addEventListener("change", () => setPaper({ marginLine: marginLine.checked }));
-  creamPaper.addEventListener("change", () => setPaper({ color: creamPaper.checked ? "cream" : "white" }));
   printPaper.addEventListener("change", () => setPaper({ print: printPaper.checked }));
   titleLine.addEventListener("change", () => {
     titleUnderline = titleLine.checked;
@@ -609,13 +668,12 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     paperSpacing.set(paper.lineSpacingMm);
     paperSpacing.root.hidden = paper.kind !== "lined";
     marginLine.checked = paper.marginLine;
-    creamPaper.checked = paper.color === "cream";
     printPaper.checked = paper.print;
     titleLine.checked = titleUnderline;
   }
 
   function setPaper(change: Partial<PaperSettings>): void {
-    paper = { ...paper, ...change };
+    paper = cleanPaper({ ...paper, ...change });
     savePreference("sheet.paper", paper);
     showPaper();
     changed();
@@ -625,48 +683,167 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
 
   const busy = h("p", { class: "busy", hidden: true }, es.sheet.preparing);
 
+  // ----- The settings panel: sections that fold, a search box and resets -----
+  const amountSlider = slider({
+    label: es.sheet.naturalnessAmount,
+    min: 0,
+    max: NATURAL_MAX,
+    step: 0.01,
+    value: naturalnessAmount,
+    defaultValue: 1,
+    format: percent,
+    onInput: (value) => {
+      naturalnessAmount = value;
+      savePreference("sheet.naturalnessAmount", naturalnessAmount);
+      persist();
+      relayout();
+      scheduleRender();
+    },
+  });
+
+  /** A setting that is not a slider, findable with the search box. */
+  const field = (label: string, ...children: (Node | string)[]) =>
+    h("div", { class: "field", "data-search": searchKey(label) }, h("label", { class: "field-label" }, label), ...children);
+  const check = (input: HTMLInputElement, label: string, title?: string) =>
+    h("label", { class: "check", "data-search": searchKey(`${label} ${title ?? ""}`), title }, input, label);
+
+  const sections: HTMLDetailsElement[] = [];
+  const openSections = loadPreference<Record<string, boolean>>("sheet.openSections", {});
+  const section = (id: string, title: string, onReset: () => void, ...children: Node[]) => {
+    const reset = h("button", { type: "button", class: "section-reset", title: es.panel.resetHelp(title) }, es.panel.reset);
+    reset.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onReset();
+      toast(es.panel.resetDone(title));
+    });
+    const details = h("details", { class: "panel-section", "data-id": id, open: openSections[id] ?? true }, h("summary", {}, h("span", { class: "section-title" }, title), reset), h("div", { class: "section-body" }, ...children));
+    details.addEventListener("toggle", () => {
+      if (searchInput.value) return;
+      openSections[id] = details.open;
+      savePreference("sheet.openSections", openSections);
+    });
+    sections.push(details);
+    return details;
+  };
+
+  const resetInstrument = () => {
+    penId = DEFAULT_PEN_ID;
+    inkColor = INK_COLORS[0].value;
+    penTuning = { widthScale: 1, inkStrength: 1 };
+    penSelect.value = penId;
+    customColor.setColor(inkColor);
+    renderSwatches();
+    for (const [key, set] of tuningSetters) set(penTuning[key]);
+    persist();
+    scheduleRender();
+  };
+  const resetPage = () => {
+    page = { ...A4 };
+    for (const [key, set] of pageSetters) set(page[key]);
+    titleUnderline = true;
+    savePreference("sheet.titleUnderline", titleUnderline);
+    showPaper();
+    persist();
+    relayout();
+    scheduleRender();
+  };
+  const resetNaturalness = () => {
+    presetId = DEFAULT_PRESET_ID;
+    presetSelect.value = presetId;
+    setNaturalness(presetById(presetId).values);
+    naturalnessAmount = 1;
+    amountSlider.set(1);
+    savePreference("sheet.naturalnessAmount", 1);
+    persist();
+    relayout();
+    scheduleRender();
+  };
+
+  const advanced = h(
+    "details",
+    { class: "advanced", open: loadPreference("sheet.advancedOpen", false) },
+    h("summary", {}, es.panel.advanced),
+    h("p", { class: "muted" }, es.panel.advancedHelp),
+    ...naturalControls,
+  );
+  advanced.addEventListener("toggle", () => {
+    if (!searchInput.value) savePreference("sheet.advancedOpen", advanced.open);
+  });
+
+  const searchInput = h("input", { type: "search", class: "text-input panel-search", placeholder: es.panel.search, "aria-label": es.panel.search });
+  const noResults = h("p", { class: "muted", hidden: true }, es.panel.noResults);
+  searchInput.addEventListener("input", () => {
+    const query = searchKey(searchInput.value.trim());
+    let any = false;
+    for (const details of sections) {
+      let matches = 0;
+      for (const item of details.querySelectorAll<HTMLElement>("[data-search]")) {
+        const hit = !query || (item.dataset.search ?? "").includes(query);
+        item.classList.toggle("search-hidden", !hit);
+        if (hit) matches++;
+      }
+      const titleHit = !!query && searchKey(details.querySelector(".section-title")?.textContent ?? "").includes(query);
+      if (titleHit) for (const item of details.querySelectorAll<HTMLElement>("[data-search]")) item.classList.remove("search-hidden");
+      details.hidden = !!query && matches === 0 && !titleHit;
+      if (query) details.open = matches > 0 || titleHit;
+      else details.open = openSections[details.dataset.id ?? ""] ?? true;
+      any ||= !details.hidden;
+    }
+    advanced.open = query ? advanced.querySelector("[data-search]:not(.search-hidden)") !== null : loadPreference("sheet.advancedOpen", false);
+    noResults.hidden = !query || any;
+  });
+
   const controls = h(
     "aside",
     { class: "panel sheet-controls" },
+    searchInput,
+    noResults,
     warnings,
-    h("label", { class: "field-label first" }, es.sheet.pen),
-    penSelect,
-    h("label", { class: "field-label" }, es.sheet.color),
-    colorPicker,
-    tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
-    tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
-    h("hr"),
-    pageSlider(es.sheet.size, "xHeightMm", 1, 15, 0.1),
-    pageSlider(es.sheet.lineSpacing, "lineSpacingMm", 3, 40, 0.5),
-    pageSlider(es.sheet.letterSpacing, "letterSpacing", -0.3, 2, 0.01, spacingFormat),
-    pageSlider(es.sheet.wordSpacing, "wordSpacing", 0.2, 6, 0.05, spacingFormat),
-    h("p", { class: "field-label" }, es.sheet.margins),
-    pageSlider(es.sheet.marginLeft, "marginLeftMm", 0, 100, 1),
-    pageSlider(es.sheet.marginRight, "marginRightMm", 0, 100, 1),
-    pageSlider(es.sheet.marginTop, "marginTopMm", 0, 100, 1),
-    pageSlider(es.sheet.marginBottom, "marginBottomMm", 0, 100, 1),
-    h("label", { class: "check" }, titleLine, es.sheet.titleUnderline),
-    h("hr"),
-    h("h3", { class: "panel-subtitle" }, es.paper.title),
-    paperSelect,
-    paperSpacing.root,
-    h("label", { class: "check" }, marginLine, es.paper.marginLine),
-    h("label", { class: "check" }, creamPaper, es.paper.cream),
-    h("label", { class: "check", title: es.paper.printHelp }, printPaper, es.paper.print),
-    h("hr"),
-    h("h3", { class: "panel-subtitle" }, es.sheet.naturalness),
-    h("label", { class: "field-label" }, es.sheet.preset),
-    presetSelect,
-    h("div", { class: "button-row" }, randomButton),
-    h("p", { class: "muted" }, es.sheet.randomHelp),
-    ...naturalControls,
-    h("hr"),
-    h("div", { class: "inline spaced" }, rewriteButton, versionLabel),
-    h("p", { class: "muted" }, es.sheet.rewriteHelp),
-    h("hr"),
-    h("div", { class: "button-row" }, button(es.sheet.print, () => void output("print"), "primary"), button(es.sheet.exportPdf, () => void output("pdf"))),
-    busy,
-    h("p", { class: "muted" }, es.sheet.printTip),
+    section(
+      "instrument",
+      es.panel.instrument,
+      resetInstrument,
+      h("p", { class: "muted section-help" }, es.panel.instrumentHelp),
+      field(es.sheet.pen, penSelect),
+      field(es.sheet.color, colorPicker),
+      tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
+      tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
+    ),
+    section(
+      "page",
+      es.panel.page,
+      resetPage,
+      pageSlider(es.sheet.size, "xHeightMm", 1, 15, 0.1),
+      pageSlider(es.sheet.lineSpacing, "lineSpacingMm", 3, 40, 0.5),
+      pageSlider(es.sheet.letterSpacing, "letterSpacing", -0.3, 2, 0.01, spacingFormat),
+      pageSlider(es.sheet.wordSpacing, "wordSpacing", 0.2, 6, 0.05, spacingFormat),
+      h("p", { class: "field-label", "data-search": searchKey([es.sheet.margins, es.sheet.marginLeft, es.sheet.marginRight, es.sheet.marginTop, es.sheet.marginBottom].join(" ")) }, es.sheet.margins),
+      pageSlider(es.sheet.marginLeft, "marginLeftMm", 0, 100, 1, mmFormat, es.sheet.margins),
+      pageSlider(es.sheet.marginRight, "marginRightMm", 0, 100, 1, mmFormat, es.sheet.margins),
+      pageSlider(es.sheet.marginTop, "marginTopMm", 0, 100, 1, mmFormat, es.sheet.margins),
+      pageSlider(es.sheet.marginBottom, "marginBottomMm", 0, 100, 1, mmFormat, es.sheet.margins),
+      check(titleLine, es.sheet.titleUnderline),
+    ),
+    section(
+      "paper",
+      es.paper.title,
+      () => setPaper({ ...DEFAULT_PAPER }),
+      field(es.paper.kind, paperSelect),
+      paperSpacing.root,
+      check(marginLine, es.paper.marginLine),
+      check(printPaper, es.paper.print, es.paper.printHelp),
+    ),
+    section(
+      "naturalness",
+      es.sheet.naturalness,
+      resetNaturalness,
+      field(es.sheet.preset, presetSelect, h("div", { class: "button-row" }, randomButton), h("p", { class: "muted" }, es.sheet.randomHelp)),
+      amountSlider.root,
+      advanced,
+      h("div", { "data-search": searchKey(`${es.sheet.rewrite} ${es.sheet.rewriteHelp}`) }, h("div", { class: "inline spaced" }, rewriteButton, versionLabel), h("p", { class: "muted" }, es.sheet.rewriteHelp)),
+    ),
+    h("div", { class: "panel-footer" }, h("div", { class: "button-row" }, button(es.sheet.print, () => void output("print"), "primary"), button(es.sheet.exportPdf, () => void output("pdf"))), busy, h("p", { class: "muted" }, es.sheet.printTip)),
   );
 
   const root = h("div", { class: "sheet-view" }, previewArea, controls);
@@ -688,12 +865,14 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     warnings.replaceChildren(...items);
   }
 
-  const layoutFormat = (): LayoutFormat => ({ marks, paragraphs, paper, titleUnderline });
+  const layoutFormat = (): LayoutFormat => ({ marks, paragraphs, paper, titleUnderline, runStyles });
+  /** The imperfections actually used: the advanced values times the overall amount. */
+  const effectiveNaturalness = () => scaledNaturalness(naturalness, naturalnessAmount);
 
   /** Recomputes where everything goes (fast); the drawing follows later. */
   function relayout(): void {
     const hand = store.get().hand;
-    layout = layoutText(lastText, hand, page, naturalness, seed, charIds, layoutFormat());
+    layout = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
     renderWarnings(layout);
     editor.setLayout(layout, page);
     editor.setEmptyMessage(Object.keys(hand.glyphs).length > 0 ? null : es.sheet.emptyHand);
@@ -706,6 +885,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       penId,
       currentColor(),
       JSON.stringify(naturalness),
+      naturalnessAmount,
+      JSON.stringify(runStyles),
       seed,
       JSON.stringify(page),
       JSON.stringify(penTuning),
@@ -715,11 +896,11 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     ];
     for (const g of result.glyphs) {
       if (g.page !== pageIndex) continue;
-      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0);
+      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0, g.style);
     }
     for (const d of result.decorations) {
       if (d.page !== pageIndex) continue;
-      parts.push(d.kind, d.x0.toFixed(3), d.y0.toFixed(3), d.x1.toFixed(3), d.y1.toFixed(3), d.color, d.seed);
+      parts.push(d.kind, d.x0.toFixed(3), d.y0.toFixed(3), d.x1.toFixed(3), d.y1.toFixed(3), d.color, d.style, d.seed);
     }
     return String(hashString(parts.join("|")));
   }
@@ -744,9 +925,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         pxPerMm: backing,
         pen: penById(penId),
         color: currentColor(),
-        naturalness,
+        naturalness: effectiveNaturalness(),
         seed,
         pageIndex,
+        runStyles,
         background: "white",
         widthScale: penTuning.widthScale,
         inkStrength: penTuning.inkStrength,
@@ -775,7 +957,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const printRoot = document.getElementById("print-root")!;
     const urls: string[] = [];
     try {
-      const result = layoutText(lastText, hand, page, naturalness, seed, charIds, layoutFormat());
+      const result = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
       const pxPerMm = PRINT_DPI / MM_PER_INCH;
       // Printing keeps the ink transparent (lossless PNG). The PDF gets the ink on
       // white as high-quality JPEG: PDF viewers open it much faster and the file is
@@ -790,9 +972,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
           pxPerMm,
           pen: penById(penId),
           color: currentColor(),
-          naturalness,
+          naturalness: effectiveNaturalness(),
           seed,
           pageIndex,
+          runStyles,
           background: forPdf ? "white" : "transparent",
           widthScale: penTuning.widthScale,
           inkStrength: penTuning.inkStrength,
@@ -856,10 +1039,10 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   renderSwatches();
   showPaper();
 
-  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline });
+  const currentSettings = (): SheetSettings => ({ penId, inkColor, penTuning, page, presetId, naturalness, seed, paper, titleUnderline, naturalnessAmount });
 
   const documentApi: SheetDocumentApi = {
-    getDocument: () => ({ text: lastText, charIds, marks, paragraphs, settings: currentSettings() }),
+    getDocument: () => ({ text: lastText, charIds, marks, paragraphs, runStyles, settings: currentSettings() }),
     currentSettings,
     loadDocument(doc) {
       applyingDocument = true;
@@ -870,8 +1053,11 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         page = { ...doc.settings.page };
         presetId = doc.settings.presetId === "random" ? "custom" : doc.settings.presetId;
         seed = doc.settings.seed;
-        paper = { ...doc.settings.paper };
+        paper = cleanPaper(doc.settings.paper);
         titleUnderline = doc.settings.titleUnderline;
+        naturalnessAmount = doc.settings.naturalnessAmount;
+        amountSlider.set(naturalnessAmount);
+        savePreference("sheet.naturalnessAmount", naturalnessAmount);
         savePreference("sheet.paper", paper);
         savePreference("sheet.titleUnderline", titleUnderline);
         showPaper();
@@ -887,6 +1073,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         charIds = doc.charIds.length === doc.text.length ? doc.charIds : defaultCharIds(doc.text);
         marks = doc.marks.length === doc.text.length ? doc.marks : new Array<number>(doc.text.length).fill(0);
         paragraphs = doc.paragraphs.length === paragraphCount(doc.text) ? doc.paragraphs : new Array<number>(paragraphCount(doc.text)).fill(0);
+        runStyles = doc.runStyles.slice();
         undoStack.length = 0;
         redoStack.length = 0;
         pendingMarks = null;

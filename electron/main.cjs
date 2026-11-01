@@ -143,6 +143,7 @@ function buildMenu() {
         { label: "Cursiva", accelerator: "CmdOrCtrl+I", registerAccelerator: false, click: () => sendCommand("format:italic") },
         { label: "Subrayado", accelerator: "CmdOrCtrl+U", registerAccelerator: false, click: () => sendCommand("format:underline") },
         { label: "Tachado", accelerator: "Alt+Shift+5", registerAccelerator: false, click: () => sendCommand("format:strike") },
+        { label: "Tachón (tapar a rayajos)", click: () => sendCommand("format:scribble") },
         { label: "Resaltar", accelerator: "CmdOrCtrl+Shift+H", registerAccelerator: false, click: () => sendCommand("format:highlight") },
         { label: "Borrar formato", accelerator: "CmdOrCtrl+\\", registerAccelerator: false, click: () => sendCommand("format:clear") },
         { type: "separator" },
