@@ -7,7 +7,8 @@ interface DesktopBridge {
   loadAutosavedHand(): Promise<string | null>;
   saveHandAs(json: string, suggestedName: string): Promise<string | null>;
   openHand(): Promise<string | null>;
-  printPage(): Promise<{ ok: boolean; reason: string }>;
+  /** Prints the page; `dpi` asks the printer for that resolution (its quality mode). */
+  printPage(dpi?: number): Promise<{ ok: boolean; reason: string }>;
   exportPdf(): Promise<string | null>;
   setViewOption(name: string, value: boolean): void;
   onViewOption(callback: (name: string, value: boolean) => void): void;

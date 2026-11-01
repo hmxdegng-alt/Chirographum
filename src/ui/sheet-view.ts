@@ -3,7 +3,7 @@
 
 import { bridge, loadPreference, savePreference } from "../bridge";
 import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids";
-import type { ChiroDocument, SheetSettings } from "../engine/document";
+import type { ChiroDocument, PenTuning, SheetSettings } from "../engine/document";
 import { charactersNeeded, type Hand } from "../engine/hand";
 import { defaultCharIds, layoutText, normaliseText, type LayoutFormat, type LayoutResult } from "../engine/layout";
 import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, penById } from "../engine/pens";
@@ -66,7 +66,17 @@ import { createRuler } from "./ruler";
 import { createToolbar } from "./toolbar";
 import { createZoomControl } from "./zoom";
 
-const PRINT_DPI = 600;
+/**
+ * Print quality: how finely the page is drawn and the resolution asked of the
+ * printer. Above 600 ppp the page image stays at 600 (sharp enough for ink);
+ * what improves is the printer's own dots in greys and pale colours.
+ */
+const PRINT_QUALITIES = {
+  draft: { raster: 300, printer: 300 },
+  normal: { raster: 600, printer: 600 },
+  high: { raster: 600, printer: 1200 },
+} as const;
+type PrintQuality = keyof typeof PRINT_QUALITIES;
 const PDF_JPEG_QUALITY = 0.92;
 const MM_PER_INCH = 25.4;
 const CSS_PX_PER_MM = 96 / MM_PER_INCH;
@@ -112,6 +122,7 @@ type UsualRange = { usual: [number, number]; caution: number };
 const USUAL: Record<string, UsualRange> = {
   widthScale: { usual: [0.65, 1.6], caution: 0.25 },
   inkStrength: { usual: [0.55, 1.2], caution: 0.15 },
+  wear: { usual: [0, 0.75], caution: 0.15 },
   xHeightMm: { usual: [2, 5], caution: 0.8 },
   lineSpacingMm: { usual: [6.5, 14], caution: 2 },
   letterSpacing: { usual: [-0.05, 0.5], caution: 0.15 },
@@ -125,7 +136,6 @@ const USUAL: Record<string, UsualRange> = {
   inkSkips: { usual: [0, 0.5], caution: 0.2 },
   highlighterSmear: { usual: [0, 0.8], caution: 0.25 },
   handSmudges: { usual: [0, 0.6], caution: 0.25 },
-  fingerprints: { usual: [0, 0.6], caution: 0.3 },
   naturalnessAmount: { usual: [0.4, 1.5], caution: 0.3 },
   paperSpacing: { usual: [6, 10], caution: 0.8 },
 };
@@ -147,7 +157,6 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "inkSkips",
   "highlighterSmear",
   "handSmudges",
-  "fingerprints",
 ];
 
 /** What the document controller needs from the sheet. */
@@ -174,7 +183,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   let naturalness: Naturalness = { ...presetById(DEFAULT_PRESET_ID).values, ...loadPreference<Partial<Naturalness>>("sheet.naturalness", {}) };
   let seed = loadPreference("sheet.seed", freshSeed());
   /** The user's adjustments to the instrument: thickness and amount of ink. */
-  let penTuning = { widthScale: 1, inkStrength: 1, ...loadPreference<Partial<{ widthScale: number; inkStrength: number }>>("sheet.penTuning", {}) };
+  let penTuning: PenTuning = { widthScale: 1, inkStrength: 1, wear: 0, ...loadPreference<Partial<PenTuning>>("sheet.penTuning", {}) };
   let renderTimer: number | undefined;
   let layout: LayoutResult | null = null;
   /** What each page canvas shows, to redraw only the pages that changed. */
@@ -624,14 +633,14 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     return control.root;
   };
 
-  const tuningSlider = (label: string, key: keyof typeof penTuning, min: number, max: number) =>
+  const tuningSlider = (label: string, key: keyof PenTuning, min: number, max: number, defaultValue = 1) =>
     remembered(tuningSetters, key, slider({
       label,
       min,
       max,
       step: 0.01,
       value: penTuning[key],
-      defaultValue: 1,
+      defaultValue,
       ...USUAL[key],
       format: percent,
       onInput: (value) => {
@@ -786,6 +795,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   }
 
   const busy = h("p", { class: "busy", hidden: true }, es.sheet.preparing);
+  let printQuality = loadPreference<PrintQuality>("print.quality", "high");
+  if (!(printQuality in PRINT_QUALITIES)) printQuality = "high";
+  const qualitySelect = h("select", { class: "select", "aria-label": es.sheet.printQuality });
+  for (const quality of Object.keys(PRINT_QUALITIES) as PrintQuality[]) qualitySelect.append(h("option", { value: quality }, es.sheet.printQualities[quality]));
+  qualitySelect.value = printQuality;
+  qualitySelect.addEventListener("change", () => {
+    printQuality = qualitySelect.value as PrintQuality;
+    savePreference("print.quality", printQuality);
+  });
 
   // ----- The settings panel: sections that fold, a search box and resets -----
   const amountSlider = slider({
@@ -833,7 +851,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   };
 
   const resetInk = () => {
-    penTuning = { widthScale: 1, inkStrength: 1 };
+    penTuning = { widthScale: 1, inkStrength: 1, wear: 0 };
     for (const [key, set] of tuningSetters) set(penTuning[key]);
     persist();
     scheduleRender();
@@ -910,6 +928,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       h("p", { class: "muted section-help" }, es.panel.inkHelp),
       tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
       tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
+      tuningSlider(es.sheet.wear, "wear", 0, 1, 0),
     ),
     section(
       "page",
@@ -945,7 +964,14 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       advanced,
       h("div", { "data-search": searchKey(`${es.sheet.rewrite} ${es.sheet.rewriteHelp}`) }, h("div", { class: "inline spaced" }, rewriteButton, versionLabel), h("p", { class: "muted" }, es.sheet.rewriteHelp)),
     ),
-    h("div", { class: "panel-footer" }, h("div", { class: "button-row" }, button(es.sheet.print, () => void output("print"), "primary"), button(es.sheet.exportPdf, () => void output("pdf"))), busy, h("p", { class: "muted" }, es.sheet.printTip)),
+    h(
+      "div",
+      { class: "panel-footer" },
+      h("label", { class: "quality-row", title: es.sheet.printQualityHelp }, h("span", {}, es.sheet.printQuality), qualitySelect),
+      h("div", { class: "button-row" }, button(es.sheet.print, () => void output("print"), "primary"), button(es.sheet.exportPdf, () => void output("pdf"))),
+      busy,
+      h("p", { class: "muted" }, es.sheet.printTip),
+    ),
   );
 
   const root = h("div", { class: "sheet-view" }, previewArea, controls);
@@ -1050,6 +1076,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
         background: "white",
         widthScale: penTuning.widthScale,
         inkStrength: penTuning.inkStrength,
+        wear: penTuning.wear,
         printedLook: viewOptions().printedLook,
         paper,
         drawPaper: true,
@@ -1076,14 +1103,15 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const urls: string[] = [];
     try {
       const result = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
-      const pxPerMm = PRINT_DPI / MM_PER_INCH;
+      const { raster, printer } = PRINT_QUALITIES[printQuality];
+      const pxPerMm = raster / MM_PER_INCH;
       // Printing keeps the ink transparent (lossless PNG). The PDF gets the ink on
       // white as high-quality JPEG: PDF viewers open it much faster and the file is
       // several times smaller, with no visible difference on paper.
       const forPdf = kind === "pdf";
       const sheets: HTMLElement[] = [];
       for (let pageIndex = 0; pageIndex < result.pageCount; pageIndex++) {
-        busy.textContent = es.sheet.preparingPage(pageIndex + 1, result.pageCount);
+        busy.textContent = es.sheet.preparingPage(pageIndex + 1, result.pageCount, raster);
         await new Promise((resolve) => setTimeout(resolve, 0));
         const canvas = document.createElement("canvas");
         const box = renderPage(canvas, result, hand, page, {
@@ -1098,6 +1126,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
           background: forPdf ? "white" : "transparent",
           widthScale: penTuning.widthScale,
           inkStrength: penTuning.inkStrength,
+        wear: penTuning.wear,
           paper,
           drawPaper: paper.print,
         });
@@ -1129,7 +1158,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       printRoot.replaceChildren(...sheets);
       busy.hidden = true;
       if (kind === "print") {
-        const outcome = await bridge.printPage();
+        const outcome = await bridge.printPage(printer);
         if (!outcome.ok && outcome.reason && outcome.reason !== "cancelled") toast(`${es.sheet.printFailed} (${outcome.reason})`);
       } else {
         const file = await bridge.exportPdf();

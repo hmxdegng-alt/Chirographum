@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("chirographum", {
   loadAutosavedHand: () => ipcRenderer.invoke("hand:loadAutosave"),
   saveHandAs: (json, suggestedName) => ipcRenderer.invoke("hand:saveAs", json, suggestedName),
   openHand: () => ipcRenderer.invoke("hand:open"),
-  printPage: () => ipcRenderer.invoke("page:print"),
+  printPage: (dpi) => ipcRenderer.invoke("page:print", Number(dpi) || 0),
   exportPdf: () => ipcRenderer.invoke("page:exportPdf"),
   // Documents (.chiro).
   saveDocument: (json, filePath, suggestedName) => ipcRenderer.invoke("doc:save", json, filePath, suggestedName),

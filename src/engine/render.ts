@@ -11,7 +11,7 @@
 import { resample, type Sample } from "./geometry";
 import type { Hand } from "./hand";
 import { glyphPointToPage, type Decoration, type LayoutResult } from "./layout";
-import { PENCIL_COLOR, penById, type PenModel } from "./pens";
+import { PENCIL_COLOR, penById, wornPen, type PenModel } from "./pens";
 import { createRng, deriveSeed, type Rng } from "./random";
 import { HIGHLIGHT_COLORS, scribbleStyleOf, type RunStyle } from "./rich-text";
 import { scribbleStrokes } from "./scribble";
@@ -31,6 +31,8 @@ export interface RenderOptions {
   widthScale?: number;
   /** Ink amount multiplier ("Intensidad"), 1 = the pen as it is. */
   inkStrength?: number;
+  /** How used the instruments are (0 = new): see wornPen. */
+  wear?: number;
   /** Screen only: imitate how an inkjet printer lays the ink (fibres, dots). */
   printedLook?: boolean;
   paper?: PaperSettings;
@@ -152,81 +154,6 @@ function parseHex(color: string): [number, number, number] {
   return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) || 0) as [number, number, number];
 }
 
-/** Smooth 2D value noise in [-1, 1], cells of `cell` units. */
-function noise2D(rng: Rng, cell: number): (x: number, y: number) => number {
-  const values = new Map<number, number>();
-  const at = (i: number, j: number) => {
-    const key = i * 7919 + j;
-    let v = values.get(key);
-    if (v === undefined) {
-      v = rng.next() * 2 - 1;
-      values.set(key, v);
-    }
-    return v;
-  };
-  const smooth = (f: number) => f * f * (3 - 2 * f);
-  return (x: number, y: number) => {
-    const u = x / cell;
-    const v = y / cell;
-    const i = Math.floor(u);
-    const j = Math.floor(v);
-    const fx = smooth(u - i);
-    const fy = smooth(v - j);
-    const top = at(i, j) * (1 - fx) + at(i + 1, j) * fx;
-    const bottom = at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx;
-    return top * (1 - fy) + bottom * fy;
-  };
-}
-
-/**
- * A fingertip print in ink or graphite: ridges about half a millimetre apart
- * turning round a core, fading at the edge and missing where the finger
- * pressed less. Drawn upright; the caller rotates it.
- */
-function fingerprint(seed: number, pxPerMm: number, color: [number, number, number], strength: number): HTMLCanvasElement {
-  const rng = createRng(seed);
-  const halfW = 6 + 2 * rng.next();
-  const halfH = halfW * (1.2 + 0.15 * rng.next());
-  const period = 0.36 + 0.08 * rng.next();
-  const core = { x: (rng.next() - 0.5) * 0.3 * halfW, y: -(0.1 + 0.25 * rng.next()) * halfH };
-  const warp = noise2D(rng, 3.2);
-  const pressure = noise2D(rng, 2.6);
-  const size = Math.ceil(2 * halfH * pxPerMm) + 2;
-  const canvas = createCanvas(size, size);
-  const ctx = canvas.getContext("2d")!;
-  const image = ctx.createImageData(size, size);
-  const data = image.data;
-  const lean = (rng.next() - 0.5) * 0.25;
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      const x = (px - size / 2) / pxPerMm;
-      const y = (py - size / 2) / pxPerMm;
-      const e = (x / halfW) ** 2 + (y / halfH) ** 2;
-      if (e >= 1) continue;
-      const dx = x - core.x;
-      const dy = y - core.y;
-      // Round the core; lower down the ridges flatten into arches across the finger.
-      const r = Math.hypot(dx, dy * 0.82);
-      const arch = y + lean * x + 0.06 * x * x;
-      const below = Math.min(1, Math.max(0, (dy + 0.2 * halfH) / (0.4 * halfH)));
-      const t = Math.min(1, Math.max(0, (r - 0.35 * halfW) / (0.3 * halfW))) * (0.35 + 0.65 * below * below * (3 - 2 * below));
-      const phase = (r * (1 - t) + arch * t) / period + 0.25 * warp(x, y);
-      const ridge = (0.5 + 0.5 * Math.cos(2 * Math.PI * phase)) ** 1.5;
-      const edge = 1 - Math.min(1, Math.max(0, (e - 0.55) / 0.45));
-      const press = Math.min(1, Math.max(0, 0.35 + 0.9 * pressure(x, y)));
-      const alpha = ridge * edge * press * strength;
-      if (alpha <= 0.004) continue;
-      const k = (py * size + px) * 4;
-      data[k] = color[0];
-      data[k + 1] = color[1];
-      data[k + 2] = color[2];
-      data[k + 3] = Math.round(Math.min(1, alpha) * 255);
-    }
-  }
-  ctx.putImageData(image, 0, 0);
-  return canvas;
-}
-
 interface StrokeGeometry {
   samples: Sample[];
   widths: number[];
@@ -234,10 +161,54 @@ interface StrokeGeometry {
   startBlob: number;
   endBlob: number;
   /**
-   * A chisel tip (highlighters): the direction of its edge, a unit vector.
-   * The stroke is then a band with straight, slanted ends instead of round ones.
+   * A chisel tip (highlighters): the direction of its edge, a unit vector, and
+   * the seed of the irregular ends. The stroke is then a band instead of round dabs.
    */
-  chisel?: { x: number; y: number };
+  chisel?: { x: number; y: number; seed: number; poolStart: number; poolEnd: number };
+  /** Seed for what is drawn over the stroke afterwards (dry streaks), from the letter's identity. */
+  seed?: number;
+}
+
+/**
+ * A drying felt tip leaves pale streaks along the stroke: a few thin lines of
+ * "no ink" drawn into the tone mask (black = no ink), each covering part of it.
+ */
+function drawStreaks(ctx: CanvasRenderingContext2D, strokes: StrokeGeometry[], amount: number, dx: number, dy: number): void {
+  if (amount <= 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = "source-over";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const g of strokes) {
+    const n = g.samples.length;
+    if (n < 3) continue;
+    const rng = createRng(deriveSeed(g.seed ?? 0, "streaks"));
+    const width = g.widths.reduce((sum, w) => sum + w, 0) / n;
+    // Scratchy: many fine pale lines anywhere across the width, edges included,
+    // each of its own strength and length, like dry felt fibres dragged along.
+    const lines = 5 + Math.round(amount * 6 + rng.next() * 2);
+    for (let l = 0; l < lines; l++) {
+      const offset = rng.next() - 0.5;
+      const from = Math.floor(rng.next() * 0.6 * n);
+      const to = Math.min(n, from + Math.ceil((0.3 + 0.7 * rng.next()) * n));
+      ctx.strokeStyle = `rgba(0,0,0,${Math.min(1, amount * (0.25 + 0.6 * rng.next())).toFixed(3)})`;
+      ctx.lineWidth = Math.max(0.5, width * (0.04 + 0.08 * rng.next()) * (0.6 + amount));
+      ctx.beginPath();
+      for (let i = from; i < to; i++) {
+        const a = g.samples[Math.max(0, i - 1)];
+        const b = g.samples[Math.min(n - 1, i + 1)];
+        const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const nx = -(b.y - a.y) / length;
+        const ny = (b.x - a.x) / length;
+        const x = g.samples[i].x - dx + nx * offset * g.widths[i];
+        const y = g.samples[i].y - dy + ny * offset * g.widths[i];
+        if (i === from) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
 }
 
 /** Part of a stroke, between two distances along it. */
@@ -254,27 +225,81 @@ function sliceGeometry(g: StrokeGeometry, from: number, to: number): StrokeGeome
   };
 }
 
-/** A chisel-tip stroke: one band with straight ends, a little darker along its edges where the ink dries. */
+/**
+ * A chisel-tip stroke: one band, a little darker along its edges where the ink
+ * dries. The ends are roughly straight but never neat: each one leans its own
+ * way, bulges or dips a little, wobbles and has softened corners, as on the
+ * owner's sample sheet.
+ */
 function drawChisel(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
   const { samples, widths, tones } = g;
   const edge = g.chisel!;
+  const rng = createRng(edge.seed);
+  const n = samples.length;
   const side = (sign: number) => samples.map((s, i) => ({ x: s.x - dx + sign * edge.x * (widths[i] / 2), y: s.y - dy + sign * edge.y * (widths[i] / 2) }));
   const top = side(1);
   const bottom = side(-1);
+  const unit = (a: Sample, b: Sample) => {
+    const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    return { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
+  };
+  const width = widths.reduce((sum, w) => sum + w, 0) / n;
+  /** The outline of one end, from corner `a` to corner `b`, pushed out along `out`. */
+  const cap = (a: { x: number; y: number }, b: { x: number; y: number }, out: { x: number; y: number }) => {
+    // Each corner stops a little earlier or later: the end leans its own way.
+    const shiftA = (rng.next() - 0.5) * 0.55 * width;
+    const shiftB = (rng.next() - 0.5) * 0.55 * width;
+    const bulge = (-0.1 + 0.28 * rng.next()) * width;
+    const wobble = noise1D(rng, 0.18 * width);
+    const corner = 0.06 + 0.16 * rng.next();
+    const points: { x: number; y: number }[] = [];
+    const STEPS = 10;
+    for (let k = 0; k <= STEPS; k++) {
+      const u = k / STEPS;
+      const shift = shiftA + (shiftB - shiftA) * u;
+      // Softened corners: the outline curls back in at both ends of the cap.
+      const near = Math.min(u, 1 - u);
+      const round = near < corner ? -((1 - near / corner) ** 2) * 0.12 * width : 0;
+      const push = shift + bulge * Math.sin(Math.PI * u) ** 0.7 + 0.08 * width * wobble(u * width) + round;
+      points.push({ x: a.x + (b.x - a.x) * u + out.x * push, y: a.y + (b.y - a.y) * u + out.y * push });
+    }
+    return points;
+  };
+  const back = unit(samples[1], samples[0]);
+  const ahead = unit(samples[n - 2], samples[n - 1]);
+  const startCap = cap(bottom[0], top[0], back);
+  const endCap = cap(top[n - 1], bottom[n - 1], ahead);
   const tone = tones.reduce((sum, t) => sum + t, 0) / tones.length;
-  ctx.fillStyle = toneStyle(tone * 0.9);
-  ctx.beginPath();
-  top.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-  for (let i = bottom.length - 1; i >= 0; i--) ctx.lineTo(bottom[i].x, bottom[i].y);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = toneStyle(tone);
-  ctx.lineWidth = Math.max(0.6, widths[0] * 0.06);
-  for (const line of [top, bottom]) {
-    ctx.beginPath();
-    line.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-    ctx.stroke();
-  }
+  const outline = new Path2D();
+  startCap.forEach((p, i) => (i === 0 ? outline.moveTo(p.x, p.y) : outline.lineTo(p.x, p.y)));
+  for (let i = 1; i < n - 1; i++) outline.lineTo(top[i].x, top[i].y);
+  for (const p of endCap) outline.lineTo(p.x, p.y);
+  for (let i = n - 2; i >= 1; i--) outline.lineTo(bottom[i].x, bottom[i].y);
+  outline.closePath();
+  const base = tone * 0.8;
+  ctx.fillStyle = toneStyle(base);
+  ctx.fill(outline);
+  // Where the tip rested a moment, more ink soaked in: darker towards that end.
+  const pool = (at: Sample, out: { x: number; y: number }, length: number) => {
+    if (length <= 0) return;
+    const gradient = ctx.createLinearGradient(at.x - dx - out.x * length, at.y - dy - out.y * length, at.x - dx + out.x * 0.2 * width, at.y - dy + out.y * 0.2 * width);
+    gradient.addColorStop(0, toneStyle(base));
+    gradient.addColorStop(0.55, toneStyle(Math.min(1, tone * 0.93)));
+    gradient.addColorStop(1, toneStyle(1));
+    ctx.save();
+    ctx.clip(outline);
+    ctx.fillStyle = gradient;
+    const reach = length + 2 * width;
+    ctx.fillRect(at.x - dx - reach, at.y - dy - reach, 2 * reach, 2 * reach);
+    ctx.restore();
+  };
+  pool(samples[0], back, edge.poolStart);
+  pool(samples[n - 1], ahead, edge.poolEnd);
+  // Darker borders along the sides and round the ends.
+  ctx.strokeStyle = toneStyle(tone * 0.95);
+  ctx.lineWidth = Math.max(0.6, width * 0.05);
+  ctx.lineJoin = "round";
+  ctx.stroke(outline);
 }
 
 /** Turns one drawn stroke into page samples with width and tone at each one. */
@@ -294,7 +319,7 @@ function strokeGeometry(
   const edge = noise1D(rng, EDGE_NOISE_MM * pxPerMm);
   const edgeAmount = pen.edgeRoughness * (0.5 + 0.8 * nat.inkTexture);
   const skips = noise1D(rng, SKIP_NOISE_MM * pxPerMm * (0.6 + rng.next()));
-  const skipLevel = nat.inkSkips * pen.skipProne;
+  const skipLevel = Math.max(nat.inkSkips * pen.skipProne, (pen.dryness ?? 0) * 0.85);
   // Each stroke carries slightly more or less ink; pressure lightens the tone.
   const strokeTone = 1 - 0.07 * nat.inkTexture * rng.next();
 
@@ -589,7 +614,7 @@ const HIGHLIGHTER: PenModel = {
   kind: "marker",
   widthMm: 3,
   pressureWidth: 0.05,
-  opacity: 0.55,
+  opacity: 0.62,
   buildsUp: true,
   pressureTone: 0.05,
   grain: 0.25,
@@ -702,6 +727,8 @@ function renderMarkerStrokes(
     lctx.clip();
     lctx.globalCompositeOperation = "lighten";
     for (const g of layer) drawTone(lctx, g, 0, 0);
+    drawStreaks(lctx, layer, options.pen.streaks ?? 0, 0, 0);
+    lctx.globalCompositeOperation = "lighten";
     applyGrain(lctx, options, 0, 0, canvas.width, canvas.height);
     lctx.restore();
     blurRegion(lctx, lb, soft);
@@ -788,7 +815,7 @@ export function renderPage(
   const groups = new Map<string, InkGroup>();
   const groupFor = (style: number): InkGroup => {
     const run = style > 0 ? runStyles[style - 1] : undefined;
-    const groupPen = run?.penId ? penById(run.penId) : pen;
+    const groupPen = wornPen(run?.penId ? penById(run.penId) : pen, options.wear ?? 0);
     const color = groupPen.kind === "pencil" ? PENCIL_COLOR : (run?.color ?? options.color);
     const key = `${groupPen.id}|${color}`;
     let group = groups.get(key);
@@ -806,7 +833,8 @@ export function renderPage(
   let maxX = -Infinity;
   let maxY = -Infinity;
   let strokeCount = 0;
-  const include = (group: InkGroup, g: StrokeGeometry) => {
+  const include = (group: InkGroup, g: StrokeGeometry, seed: number) => {
+    g.seed = seed;
     const pad = Math.max(...g.widths) + Math.max(g.startBlob, g.endBlob) + softPx({ ...options, pen: group.pen }) * 3 + 2;
     for (const sample of g.samples) {
       minX = Math.min(minX, sample.x - pad);
@@ -837,7 +865,7 @@ export function renderPage(
           const mapped = glyphPointToPage(glyph, page.xHeightMm, point.x, point.y);
           return { x: mapped.x * pxPerMm + dx, y: mapped.y * pxPerMm + dy, p: point.p };
         });
-        include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)));
+        include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)), deriveSeed(glyph.seed, "stroke", strokeIndex, pass));
       });
     }
   }
@@ -851,7 +879,7 @@ export function renderPage(
       const width = widthScale * 1.1 * look.width;
       for (const stroke of scribbleStrokes(d, look)) {
         const points = stroke.map((point) => ({ x: point.x * pxPerMm, y: point.y * pxPerMm, p: point.p }));
-        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width));
+        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width), d.seed);
       }
       continue;
     }
@@ -865,26 +893,32 @@ export function renderPage(
         const geometry = strokeGeometry(sweep, rng, tip, nat, pxPerMm, d.xhMm, 1);
         const sweepRng = createRng(deriveSeed(d.seed, "chisel", n));
         if (!round) {
-          // The chisel is held at a slant: the ends are straight and lean a little.
-          const lean = (10 + 14 * sweepRng.next()) * DEG;
-          geometry.chisel = { x: Math.sin(lean), y: -Math.cos(lean) };
+          // The chisel is held at a slant; its ends are drawn rough by drawChisel.
+          const lean = (4 + 18 * sweepRng.next()) * DEG;
+          geometry.chisel = { x: Math.sin(lean), y: -Math.cos(lean), seed: deriveSeed(d.seed, "ends", n), poolStart: 0, poolEnd: 0 };
         }
         highlights.push({ geometry, color: d.color, smear, seed: deriveSeed(d.seed, "smear", n) });
-        // Where the tip rests a moment, more ink soaks in: a darker patch, more often at the end.
+        // Where the tip rests a moment, more ink soaks in: darker there, more often at the end.
         const length = geometry.samples[geometry.samples.length - 1]?.s ?? 0;
-        const pool = (0.4 + 0.9 * sweepRng.next()) * pxPerMm;
-        if (length > 3 * pool && sweepRng.next() < 0.6) {
-          const end = sliceGeometry(geometry, length - pool, length);
+        const pool = (1 + 2 * sweepRng.next()) * pxPerMm;
+        const poolEnd = length > 3 * pool && sweepRng.next() < 0.6 ? pool : 0;
+        const poolStart = length > 3 * pool && sweepRng.next() < 0.2 ? pool * 0.6 : 0;
+        if (geometry.chisel) {
+          geometry.chisel.poolEnd = poolEnd;
+          geometry.chisel.poolStart = poolStart;
+        } else {
+          // As light as the chisel's band (which is drawn at 80 % of its tone).
+          geometry.tones = geometry.tones.map((tone) => tone * 0.82);
+          // Round ends: a darker layer over that stretch.
+          const end = poolEnd > 0 ? sliceGeometry(geometry, length - poolEnd, length) : null;
           if (end) highlights.push({ geometry: end, color: d.color, smear: 0, seed: 0 });
-        }
-        if (length > 3 * pool && sweepRng.next() < 0.2) {
-          const start = sliceGeometry(geometry, 0, pool * 0.7);
+          const start = poolStart > 0 ? sliceGeometry(geometry, 0, poolStart) : null;
           if (start) highlights.push({ geometry: start, color: d.color, smear: 0, seed: 0 });
         }
       });
     } else {
       const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale));
+      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed);
     }
   }
 
@@ -917,6 +951,8 @@ export function renderPage(
     target.clip();
     target.globalCompositeOperation = "lighten";
     for (const g of group.strokes) drawTone(target, g, 0, 0);
+    drawStreaks(target, group.strokes, group.pen.streaks ?? 0, 0, 0);
+    target.globalCompositeOperation = "lighten";
     // Paper grain: the same paper under every stroke.
     applyGrain(target, groupOptions, 0, 0, canvas.width, canvas.height);
     target.restore();
@@ -1005,7 +1041,7 @@ export function renderPage(
   const smudgeAmount = (nat.handSmudges ?? 0) * 3;
   const smudging = smudgeAmount * (options.leftHanded ? 3 : 1);
   const smudgeExtra = Math.max(0, smudgeAmount - 3);
-  /** What smudges and prints add outside the ink, so the printed page keeps it. */
+  /** What smudges add outside the ink, so the printed page keeps it. */
   let marksBox: InkBox | null = null;
   if (box && smudging > 0.005) {
     const STEPS = 6;
@@ -1070,48 +1106,6 @@ export function renderPage(
       ctx.drawImage(patch, sb.x, sb.y);
       ctx.restore();
       patch.width = 0;
-    }
-  }
-
-  // 1d. Fingerprints: an inky or graphite fingertip where the paper was held,
-  // mostly near the corners and the edges.
-  const printsWanted = (nat.fingerprints ?? 0) * 1.5;
-  if (box && printsWanted > 0.005) {
-    const rng = createRng(deriveSeed(options.seed, "fingerprints", options.pageIndex));
-    const count = Math.min(6, Math.floor(printsWanted) + (rng.next() < printsWanted % 1 ? 1 : 0));
-    // The finger carries whatever wrote most of the page.
-    const main = [...groups.values()].reduce((a, b) => (b.strokes.length > a.strokes.length ? b : a));
-    const graphite = main.pen.kind === "pencil";
-    const color = parseHex(main.color);
-    const bold = Math.min(2, 1 + 0.3 * Math.max(0, (nat.fingerprints ?? 0) - 1));
-    const placed: { x: number; y: number }[] = [];
-    for (let n = 0; n < count; n++) {
-      const w = page.widthMm;
-      const hgt = page.heightMm;
-      // Where fingers hold a sheet: the lower corners, the sides, now and then the top or the middle.
-      // Two prints rarely land on the same spot.
-      let x = 0;
-      let y = 0;
-      let side = false;
-      for (let attempt = 0; attempt < 6; attempt++) {
-        side = rng.next() < 0.5;
-        const where = rng.next();
-        x = where < 0.75 ? (side ? 4 + 14 * rng.next() : w - 4 - 14 * rng.next()) : 25 + (w - 50) * rng.next();
-        y = where < 0.45 ? hgt - 8 - 22 * rng.next() : where < 0.75 ? 30 + (hgt - 60) * rng.next() : where < 0.88 ? 8 + 20 * rng.next() : 30 + (hgt - 60) * rng.next();
-        if (placed.every((p) => Math.hypot(p.x - x, p.y - y) > 22)) break;
-      }
-      placed.push({ x, y });
-      const strength = (graphite ? 0.2 + 0.12 * rng.next() : 0.1 + 0.1 * rng.next()) * bold;
-      const print = fingerprint(deriveSeed(options.seed, "print", options.pageIndex, n), pxPerMm, color, strength);
-      const reach = Math.hypot(print.width, print.height) / 2;
-      marksBox = unionBox(marksBox, clampBox({ x: x * pxPerMm - reach, y: y * pxPerMm - reach, width: 2 * reach, height: 2 * reach }, canvas.width, canvas.height), canvas.width, canvas.height);
-      ctx.save();
-      ctx.globalCompositeOperation = "destination-over";
-      ctx.translate(x * pxPerMm, y * pxPerMm);
-      ctx.rotate((rng.next() - 0.5) * 1.6 + (side ? 0.3 : -0.3));
-      ctx.drawImage(print, -print.width / 2, -print.height / 2);
-      ctx.restore();
-      print.width = 0;
     }
   }
 

@@ -44,6 +44,42 @@ export interface PenModel {
   smudge: number;
   /** Edge softness in millimetres (pencil and felt tips are fuzzier than gel). */
   softnessMm: number;
+  /** Running out of ink (0–1): gaps and faint stretches whatever "El boli falla" says. */
+  dryness?: number;
+  /** A drying felt tip (0–1): pale streaks along the stroke where the fibres are dry. */
+  streaks?: number;
+}
+
+/**
+ * The same instrument after a lot of use (0 = new, 1 = nearly finished): a
+ * pencil gets a blunt point (wider, softer, lighter, grainier); a felt tip
+ * dries out (faint, streaky, broken); a pen runs out of ink (faint, skipping).
+ */
+export function wornPen(pen: PenModel, wear: number): PenModel {
+  const w = Math.max(0, Math.min(1, wear));
+  if (w <= 0) return pen;
+  switch (pen.kind) {
+    case "pencil":
+      return {
+        ...pen,
+        widthMm: pen.widthMm * (1 + 0.5 * w),
+        softnessMm: pen.softnessMm + 0.025 * w,
+        opacity: pen.opacity * (1 - 0.35 * w),
+        grain: Math.min(1, pen.grain + 0.3 * w),
+        edgeRoughness: pen.edgeRoughness + 0.2 * w,
+      };
+    case "marker":
+      return {
+        ...pen,
+        opacity: pen.opacity * (1 - 0.55 * w),
+        dryness: 0.7 * w,
+        streaks: w,
+        grain: Math.min(1, pen.grain + 0.4 * w),
+        edgeRoughness: pen.edgeRoughness + 0.4 * w,
+      };
+    default:
+      return { ...pen, opacity: pen.opacity * (1 - 0.3 * w), dryness: 0.7 * w };
+  }
 }
 
 export const PENS: PenModel[] = [

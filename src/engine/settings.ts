@@ -93,8 +93,6 @@ export interface Naturalness {
   highlighterSmear: number;
   /** The writing hand rubs over fresh ink or graphite now and then (0–1). */
   handSmudges: number;
-  /** Faint fingerprints of ink or graphite where the paper was held (0–1). */
-  fingerprints: number;
 }
 
 export interface Preset {
@@ -122,7 +120,6 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.2,
       handSmudges: 0,
-      fingerprints: 0,
     },
   },
   {
@@ -143,7 +140,6 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.45,
       handSmudges: 0.05,
-      fingerprints: 0.1,
     },
   },
   {
@@ -164,7 +160,6 @@ export const PRESETS: Preset[] = [
       inkSkips: 0,
       highlighterSmear: 0.75,
       handSmudges: 0.15,
-      fingerprints: 0.3,
     },
   },
 ];

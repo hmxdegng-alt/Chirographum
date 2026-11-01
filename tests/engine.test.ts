@@ -42,6 +42,7 @@ import {
 import { createRng, deriveSeed } from "../src/engine/random";
 import { scribbleStrokes } from "../src/engine/scribble";
 import { sliderZone } from "../src/ui/dom";
+import { penById, wornPen } from "../src/engine/pens";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
@@ -297,7 +298,7 @@ describe("random preset", () => {
 const documentDefaults = {
   penId: "gel-07",
   inkColor: "#22399a",
-  penTuning: { widthScale: 1, inkStrength: 1 },
+  penTuning: { widthScale: 1, inkStrength: 1, wear: 0 },
   page: A4,
   presetId: "normal",
   naturalness: presetById("normal").values,
@@ -312,7 +313,7 @@ describe("documents", () => {
   const defaults = {
     penId: "gel-07",
     inkColor: "#22399a",
-    penTuning: { widthScale: 1, inkStrength: 1 },
+    penTuning: { widthScale: 1, inkStrength: 1, wear: 0 },
     page: A4,
     presetId: "normal",
     naturalness: presetById("normal").values,
@@ -601,5 +602,19 @@ describe("unusual values on sliders", () => {
     expect(sliderZone(1.5, usual, 0.8)).toBe("caution");
     expect(sliderZone(1, usual, 0.8)).toBe("excess");
     expect(sliderZone(100, undefined, 0.8)).toBe("usual");
+  });
+});
+
+describe("worn instruments", () => {
+  it("a new instrument is unchanged; a used one changes the way its kind does", () => {
+    const gel = penById("gel-07");
+    expect(wornPen(gel, 0)).toBe(gel);
+    const pencil = wornPen(penById("pencil-hb"), 1);
+    expect(pencil.widthMm).toBeGreaterThan(penById("pencil-hb").widthMm * 1.4);
+    expect(pencil.dryness ?? 0).toBe(0);
+    const marker = wornPen(penById("marker-medium"), 1);
+    expect(marker.streaks).toBe(1);
+    expect(marker.opacity).toBeLessThan(penById("marker-medium").opacity * 0.6);
+    expect(wornPen(gel, 0.5).dryness).toBeGreaterThan(0.3);
   });
 });

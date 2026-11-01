@@ -299,8 +299,11 @@ function registerIpc() {
     return fs.readFile(result.filePaths[0], "utf8");
   });
 
-  ipcMain.handle("page:print", async () => {
+  ipcMain.handle("page:print", async (_event, dpi) => {
     if (!mainWindow) return { ok: false, reason: "no-window" };
+    // Most drivers pick their quality mode from the resolution asked for:
+    // more dots per inch means finer dots in light greys and colours.
+    const resolution = Math.round(Number(dpi) || 0);
     return new Promise((resolve) => {
       mainWindow.webContents.print(
         {
@@ -308,6 +311,7 @@ function registerIpc() {
           printBackground: true,
           pageSize: "A4",
           margins: { marginType: "none" },
+          ...(resolution >= 150 && resolution <= 2400 ? { dpi: { horizontal: resolution, vertical: resolution } } : {}),
         },
         (ok, reason) => resolve({ ok, reason: reason || "" }),
       );

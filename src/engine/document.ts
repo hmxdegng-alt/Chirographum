@@ -12,6 +12,8 @@ export const DOCUMENT_EXTENSION = "chiro";
 export interface PenTuning {
   widthScale: number;
   inkStrength: number;
+  /** How used the instrument is (0 = new): see wornPen. */
+  wear: number;
 }
 
 export interface SheetSettings {
