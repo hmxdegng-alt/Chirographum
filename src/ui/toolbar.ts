@@ -7,10 +7,12 @@
 import { loadPreference, savePreference } from "../bridge";
 import { INK_COLORS, PENS } from "../engine/pens";
 import {
+  CORRECTIONS,
   HIGHLIGHT_COLORS,
   PARAGRAPH_STYLES,
   SCRIBBLE_KINDS,
   type Alignment,
+  type Correction,
   type ParagraphStyle,
   type ScribbleKind,
   type ScribbleStyle,
@@ -46,6 +48,8 @@ export interface ToolbarState {
   highlightWords: boolean;
   /** …with round ends instead of square ones. */
   highlightRound: boolean;
+  /** How the selection is corrected by hand, if it is. */
+  correction: Correction | null;
 }
 
 /** Sizes offered for a selection, relative to the paragraph. */
@@ -72,6 +76,28 @@ function scribblePreview(kind: ScribbleKind, rage: number, withWord = true): SVG
     path.setAttribute("d", stroke.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" "));
     svg.append(path);
   }
+  return svg;
+}
+
+/** A dab of correction fluid with a letter written on it. */
+function correctIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 20 16");
+  svg.setAttribute("width", "20");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("aria-hidden", "true");
+  const dab = document.createElementNS(SVG_NS, "path");
+  dab.setAttribute("d", "M3.5 4.5c3-1.2 9.5-1.6 13-0.4c1.5 0.6 1.6 6.4 0.2 7.2c-3.2 1.4-10 1.2-13.1 0.2c-1.6-0.6-1.6-6.4-0.1-7z");
+  dab.setAttribute("fill", "#ffffff");
+  dab.setAttribute("stroke", "currentColor");
+  dab.setAttribute("stroke-width", "1.1");
+  const letter = document.createElementNS(SVG_NS, "path");
+  letter.setAttribute("d", "M8.2 10.2c-1.4-0.2-1.4-2.8 0.2-3c1.2-0.1 1.6 1.4 1.4 3M9.8 7.4v2.9M11.6 10.4l1.4-3.4l1.4 3.4");
+  letter.setAttribute("fill", "none");
+  letter.setAttribute("stroke", "currentColor");
+  letter.setAttribute("stroke-width", "1.1");
+  letter.setAttribute("stroke-linecap", "round");
+  svg.append(dab, letter);
   return svg;
 }
 
@@ -354,6 +380,40 @@ export function createToolbar(
   });
   const highlightGroup = h("div", { class: "tool-group" }, highlight, colorToggle, colorMenu);
 
+  // Corrections made by hand: correction fluid, written over, rubbed out, added above.
+  const correctButton = tool(correctIcon(), es.toolbar.correct, "format:correct", "icon");
+  const correctToggle = h("button", { type: "button", class: "tool caret", title: es.toolbar.correctOptions, "aria-label": es.toolbar.correctOptions }, "▾");
+  correctToggle.addEventListener("mousedown", (event) => event.preventDefault());
+  const correctMenu = h("div", { class: "tool-menu correct-menu", hidden: true, role: "menu" });
+  const correctItems = new Map<Correction, HTMLButtonElement>();
+  for (const kind of CORRECTIONS) {
+    const item = h(
+      "button",
+      { type: "button", class: "menu-item", role: "menuitemradio" },
+      h("span", { class: "menu-item-title" }, es.toolbar.corrections[kind].label),
+      h("span", { class: "menu-item-help" }, es.toolbar.corrections[kind].help),
+    );
+    item.addEventListener("mousedown", (event) => event.preventDefault());
+    item.addEventListener("click", () => {
+      correctMenu.hidden = true;
+      onCommand(`correct:${kind}`);
+    });
+    correctItems.set(kind, item);
+    correctMenu.append(item);
+  }
+  const removeCorrection = h("button", { type: "button", class: "menu-text", role: "menuitem" }, es.toolbar.removeCorrection);
+  removeCorrection.addEventListener("mousedown", (event) => event.preventDefault());
+  removeCorrection.addEventListener("click", () => {
+    correctMenu.hidden = true;
+    onCommand("correct:none");
+  });
+  correctMenu.append(removeCorrection);
+  correctToggle.addEventListener("click", () => (correctMenu.hidden = !correctMenu.hidden));
+  document.addEventListener("pointerdown", (event) => {
+    if (!correctMenu.hidden && !correctMenu.contains(event.target as Node) && event.target !== correctToggle) correctMenu.hidden = true;
+  });
+  const correctGroup = h("div", { class: "tool-group" }, correctButton, correctToggle, correctMenu);
+
   // "Borrar formato", as in Docs: the selection back to plain text.
   const clearFormat = tool(clearIcon(), es.toolbar.clearFormat, "format:clear", "icon");
 
@@ -384,6 +444,7 @@ export function createToolbar(
     underline,
     strike,
     scribbleGroup,
+    correctGroup,
     highlightGroup,
     clearFormat,
     separator(),
@@ -427,6 +488,8 @@ export function createToolbar(
       highlightChip.style.background = HIGHLIGHT_COLORS[state.highlightColor]?.value ?? HIGHLIGHT_COLORS[0].value;
       for (const { align, element } of aligns) element.classList.toggle("active", align === state.align);
       highlightPerWord.checked = state.highlightWords;
+      correctButton.classList.toggle("active", state.correction !== null);
+      for (const [kind, item] of correctItems) item.classList.toggle("active", kind === state.correction);
       squareEnds.classList.toggle("active", !state.highlightRound);
       roundEnds.classList.toggle("active", state.highlightRound);
     },

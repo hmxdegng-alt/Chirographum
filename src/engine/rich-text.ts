@@ -6,6 +6,7 @@
 // ----- Character marks (one number per character) -----
 // Bits 0–5: flags. Bits 6–8: highlighter colour. Bits 9–16: run style
 // (instrument, colour and size chosen for that part of the text).
+// Bits 17–19: correction (Típex, written over, rubbed out, added above).
 
 export const BOLD = 1;
 export const ITALIC = 2;
@@ -189,6 +190,30 @@ export function withHighlightColor(marks: number, index: number): number {
   return (marks & ~(7 << HIGHLIGHT_COLOR_SHIFT)) | ((index & 7) << HIGHLIGHT_COLOR_SHIFT);
 }
 
+/**
+ * Ways of correcting by hand: written on correction fluid, written over by
+ * what comes next, rubbed out with an eraser (what comes next is written on
+ * top), or added above the line with a caret ^.
+ */
+export const CORRECTIONS = ["tipex", "over", "erase", "above"] as const;
+export type Correction = (typeof CORRECTIONS)[number];
+const CORRECTION_SHIFT = 17;
+
+export function correctionOf(marks: number): Correction | null {
+  return CORRECTIONS[((marks >>> CORRECTION_SHIFT) & 7) - 1] ?? null;
+}
+
+export function withCorrection(marks: number, correction: Correction | null): number {
+  const k = correction ? CORRECTIONS.indexOf(correction) + 1 : 0;
+  return (marks & ~(7 << CORRECTION_SHIFT)) | (k << CORRECTION_SHIFT);
+}
+
+/** Letters the next ones are written on top of: their width does not move the pen on. */
+export function isUnder(marks: number): boolean {
+  const c = correctionOf(marks);
+  return c === "over" || c === "erase";
+}
+
 // ----- Paragraph attributes (one small number per paragraph) -----
 
 export const PARAGRAPH_STYLES = ["normal", "title", "subtitle", "h1", "h2", "h3"] as const;
@@ -313,7 +338,7 @@ export function setMark(marks: number[], start: number, end: number, flag: numbe
 /** Removes every flag and the highlighter, keeping the instrument, colour and size. */
 export function clearFlags(marks: number[], start: number, end: number): number[] {
   const next = marks.slice();
-  for (let i = start; i < end; i++) next[i] = next[i] & ~(FLAGS | (7 << HIGHLIGHT_COLOR_SHIFT));
+  for (let i = start; i < end; i++) next[i] = next[i] & ~(FLAGS | (7 << HIGHLIGHT_COLOR_SHIFT) | (7 << CORRECTION_SHIFT));
   return next;
 }
 

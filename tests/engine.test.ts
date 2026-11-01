@@ -29,6 +29,9 @@ import {
   HIGHLIGHT,
   highlightColorIndex,
   rangeHasMark,
+  clearFlags,
+  withCorrection,
+  correctionOf,
   withHighlightColor,
   SCRIBBLE,
   SCRIBBLE_KINDS,
@@ -616,5 +619,50 @@ describe("worn instruments", () => {
     expect(marker.streaks).toBe(1);
     expect(marker.opacity).toBeLessThan(penById("marker-medium").opacity * 0.6);
     expect(wornPen(gel, 0.5).dryness).toBeGreaterThan(0.3);
+  });
+});
+
+describe("corrections by hand", () => {
+  const hand = syntheticHand("unodstrecaiflhvzm");
+  const nat = { ...presetById("normal").values, sizeVariation: 0, spacingVariation: 0, baselineWobble: 0, rotation: 0 };
+  const mark = (text: string, from: number, to: number, kind: Parameters<typeof withCorrection>[1]) =>
+    Array.from(text, (_, i) => (i >= from && i < to ? withCorrection(0, kind) : 0));
+  const glyphAt = (r: ReturnType<typeof layoutText>, i: number) => r.glyphs.find((g) => g.index === i)!;
+
+  it("a rubbed-out word is written over by the next one, and it is faint", () => {
+    const text = "uno dos tres";
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 4, 7, "erase") });
+    expect(glyphAt(r, 8).xMm).toBeCloseTo(glyphAt(r, 4).xMm, 5);
+    expect(glyphAt(r, 4).erased).toBe(true);
+    expect(glyphAt(r, 8).erased).toBe(false);
+    expect(r.decorations.some((d) => d.kind === "erased")).toBe(true);
+  });
+
+  it("a letter written over: the next letter goes on top of it", () => {
+    const text = "dons";
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 2, 3, "over") });
+    expect(glyphAt(r, 3).xMm).toBeCloseTo(glyphAt(r, 2).xMm, 5);
+  });
+
+  it("words added above the line sit higher, smaller, over the gap, with a caret", () => {
+    const text = "con mis amigos";
+    const plain = layoutText(text, hand, A4, nat, 3);
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks: mark(text, 4, 7, "above") });
+    expect(glyphAt(r, 4).yMm).toBeLessThan(glyphAt(r, 0).yMm - A4.lineSpacingMm * 0.4);
+    expect(glyphAt(r, 4).scale).toBeLessThan(glyphAt(r, 0).scale);
+    // "amigos" moves left: there is a single gap where "mis" was.
+    expect(glyphAt(r, 8).xMm).toBeLessThan(glyphAt(plain, 8).xMm - 3);
+    const caret = r.decorations.find((d) => d.kind === "caret")!;
+    expect(caret.x0).toBeGreaterThan(glyphAt(r, 2).xMm);
+    expect(caret.x1).toBeLessThan(glyphAt(r, 8).xMm + glyphAt(r, 8).widthMm);
+  });
+
+  it("correction fluid makes a patch; typing after a correction is plain; clearing removes it", () => {
+    const text = "uno dos";
+    const marks = mark(text, 4, 7, "tipex");
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks });
+    expect(r.decorations.filter((d) => d.kind === "tipex")).toHaveLength(1);
+    expect(correctionOf(marks[5])).toBe("tipex");
+    expect(correctionOf(clearFlags(marks, 0, text.length)[5])).toBeNull();
   });
 });

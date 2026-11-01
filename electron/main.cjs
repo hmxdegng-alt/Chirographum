@@ -144,6 +144,17 @@ function buildMenu() {
         { label: "Subrayado", accelerator: "CmdOrCtrl+U", registerAccelerator: false, click: () => sendCommand("format:underline") },
         { label: "Tachado", accelerator: "Alt+Shift+5", registerAccelerator: false, click: () => sendCommand("format:strike") },
         { label: "Tachón", click: () => sendCommand("format:scribble") },
+        {
+          label: "Corrección",
+          submenu: [
+            { label: "Típex", click: () => sendCommand("correct:tipex") },
+            { label: "Escrito encima", click: () => sendCommand("correct:over") },
+            { label: "Borrado con goma", click: () => sendCommand("correct:erase") },
+            { label: "Añadido arriba con ^", click: () => sendCommand("correct:above") },
+            { type: "separator" },
+            { label: "Quitar corrección", click: () => sendCommand("correct:none") },
+          ],
+        },
         { label: "Resaltar", accelerator: "CmdOrCtrl+Shift+H", registerAccelerator: false, click: () => sendCommand("format:highlight") },
         { label: "Borrar formato", accelerator: "CmdOrCtrl+\\", registerAccelerator: false, click: () => sendCommand("format:clear") },
         { type: "separator" },

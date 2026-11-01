@@ -8,9 +8,11 @@ import { variantBounds, type Hand } from "./hand";
 import { clampedGauss, createRng, deriveSeed, hashString } from "./random";
 import {
   BOLD,
+  correctionOf,
   decodeParagraph,
   HIGHLIGHT,
   highlightColorIndex,
+  isUnder,
   ITALIC,
   runStyleIndex,
   SCRIBBLE,
@@ -50,11 +52,16 @@ export interface PlacedGlyph {
   bold: boolean;
   /** Run style (instrument, colour, size) of the letter; 0 = the document's. */
   style: number;
+  /** Rubbed out with an eraser: only a faint trace is left. */
+  erased?: boolean;
 }
 
-/** A line drawn by hand over the text: underline, strikethrough or highlighter. */
+/**
+ * Something drawn by hand over or under the text: underline, strikethrough,
+ * highlighter, scribble, correction fluid, eraser marks or an insertion caret.
+ */
 export interface Decoration {
-  kind: "underline" | "strike" | "highlight" | "scribble";
+  kind: "underline" | "strike" | "highlight" | "scribble" | "tipex" | "erased" | "caret";
   page: number;
   x0: number;
   y0: number;
@@ -381,14 +388,28 @@ export function layoutText(
     return Math.max(0.3, 1 - nat.edgeShrink * 0.22 * Math.max(0, Math.min(1.3, into)));
   };
 
-  /** Places a word starting at startX; returns the glyphs, where each character starts and where the pen ends. */
-  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], startX: number, line: LineState) => {
+  /**
+   * Places a word starting at startX; returns the glyphs, where each character
+   * starts, where the pen goes on from and how far the ink reaches. Letters
+   * written over or rubbed out send the pen back to where they began, so what
+   * follows is written on top of them.
+   */
+  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], indices: number[], startX: number, line: LineState) => {
     const xh = baseXh * line.scale;
     const placed: PlacedGlyph[] = [];
     const gaps: MissingBox[] = [];
     const starts: number[] = [];
     let x = startX;
+    let underFrom: number | null = null;
+    let reach = startX;
     plans.forEach((plan, i) => {
+      const under = isUnder(marks[indices[i]] ?? 0);
+      if (under && underFrom === null) underFrom = x;
+      if (!under && underFrom !== null) {
+        reach = Math.max(reach, x);
+        x = underFrom;
+        underFrom = null;
+      }
       starts.push(x);
       if (!plan) {
         gaps.push({ page: line.page, xMm: x, yMm: baselineAt(line, x), widthMm: MISSING_GAP * xh, char: chars[i] });
@@ -412,10 +433,14 @@ export function layoutText(
         widthMm,
         bold: plan.bold,
         style: plan.style,
+        erased: correctionOf(marks[plan.index] ?? 0) === "erase",
       });
       x += widthMm + page.letterSpacing * baseXh * scale * (1 + plan.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
     });
-    return { placed, gaps, starts, endX: x };
+    reach = Math.max(reach, x);
+    // Ending on letters to be written over: the next word goes on top of them.
+    if (underFrom !== null) return { placed, gaps, starts, endX: underFrom, reach, over: true };
+    return { placed, gaps, starts, endX: reach, reach, over: false };
   };
 
   let lineIndex = 0;
@@ -488,37 +513,121 @@ export function layoutText(
     lineHasWords = true;
   };
 
-  outer: for (const token of tokens) {
+  /** Insertion carets (^) for words added above the line. */
+  const insertCarets: Decoration[] = [];
+  const isAbove = (index: number) => correctionOf(marks[index] ?? 0) === "above";
+  const aboveWord = (token: Token) => token.kind === "word" && token.indices.every(isAbove);
+  /** After letters to be written over, the space that follows does not move the pen. */
+  let writingOver = false;
+  /** Where the last space started: an insertion goes in the middle of the gap. */
+  let gapStart: number | null = null;
+
+  /**
+   * Words added above the line (with a caret ^ where they go): smaller, in the
+   * space between this line and the one above, centred on the insertion point.
+   */
+  const placeAbove = (group: WordToken[], spaceIndices: number[]) => {
+    const insertX = gapStart !== null ? (gapStart + cursor) / 2 : cursor;
+    const above: LineState = { ...line, scale: line.scale * 0.78, baselineMm: line.baselineMm - page.lineSpacingMm * 0.52 };
+    const lay = (startX: number) => {
+      const results: ReturnType<typeof placeWord>[] = [];
+      let x = startX;
+      group.forEach((token, k) => {
+        if (k > 0) x += page.wordSpacing * baseXh * above.scale;
+        const result = placeWord(token.plans, token.chars, token.indices, x, above);
+        results.push(result);
+        x = result.endX;
+      });
+      return { results, endX: x };
+    };
+    const width = lay(0).endX;
+    const { results } = lay(insertX - width / 2);
+    group.forEach((token, k) => {
+      const result = results[k];
+      glyphs.push(...result.placed);
+      for (const g of result.placed) glyphByIndex.set(g.index, g);
+      missingBoxes.push(...result.gaps);
+      result.starts.forEach((x, i) => {
+        carets[token.indices[i]] = { page: line.page, line: line.index, xMm: x, yMm: baselineAt(above, x) };
+        line.stops.push(token.indices[i]);
+      });
+    });
+    spaceIndices.forEach((index, k) => {
+      const x = results[Math.min(k, results.length - 1)].endX;
+      carets[index] = { page: line.page, line: line.index, xMm: x, yMm: baselineAt(above, x) };
+      line.stops.push(index);
+    });
+    const first = group[0];
+    const style = runStyleIndex(marks[first.indices[0]] ?? 0);
+    const xh = baseXh * line.scale;
+    insertCarets.push({
+      kind: "caret",
+      page: line.page,
+      x0: insertX - 0.35 * xh,
+      y0: baselineAt(line, insertX),
+      x1: insertX + 0.35 * xh,
+      y1: baselineAt(line, insertX),
+      xhMm: xh,
+      color: 0,
+      style,
+      seed: deriveSeed(seed, "caret", ids[first.indices[0]] ?? first.indices[0]),
+    });
+  };
+
+  outer: for (let t = 0; t < tokens.length; t++) {
+    const token = tokens[t];
     if (token.kind === "break") {
       stopAt(token.index, cursor);
+      writingOver = false;
+      gapStart = null;
       if (!nextLine(token.key, token.paragraph + 1, true)) break;
       continue;
     }
     if (token.kind === "space") {
       stopAt(token.index, cursor);
-      if (!lineHasWords) continue;
+      if (!lineHasWords || writingOver) {
+        writingOver = false;
+        continue;
+      }
       const rng = createRng(token.seed);
+      gapStart = cursor;
       cursor += page.wordSpacing * baseXh * line.scale * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
       continue;
     }
-    let attempt = placeWord(token.plans, token.chars, cursor, line);
-    if (attempt.endX > rightMm + overflowToleranceMm && lineHasWords) {
-      if (!nextLine(token.key, token.paragraph, false)) break;
-      attempt = placeWord(token.plans, token.chars, cursor, line);
+    if (aboveWord(token) && lineHasWords) {
+      // The whole run added above: its words and the spaces between them.
+      const group: WordToken[] = [token];
+      const spaces: number[] = [];
+      while (t + 2 < tokens.length && tokens[t + 1].kind === "space" && isAbove((tokens[t + 1] as { index: number }).index) && aboveWord(tokens[t + 2])) {
+        spaces.push((tokens[t + 1] as { index: number }).index);
+        group.push(tokens[t + 2] as WordToken);
+        t += 2;
+      }
+      placeAbove(group, spaces);
+      // The gap it goes into stays a single gap: the space after it does not count again.
+      if (gapStart !== null) writingOver = true;
+      continue;
     }
-    if (attempt.endX > rightMm + overflowToleranceMm) {
+    gapStart = null;
+    let attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
+    if (attempt.reach > rightMm + overflowToleranceMm && lineHasWords) {
+      if (!nextLine(token.key, token.paragraph, false)) break;
+      attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
+    }
+    if (attempt.reach > rightMm + overflowToleranceMm) {
       // A single word longer than the whole line: break it wherever it runs out.
       for (let i = 0; i < token.plans.length; i++) {
-        let piece = placeWord([token.plans[i]], [token.chars[i]], cursor, line);
-        if (piece.endX > rightMm + overflowToleranceMm && lineHasWords) {
+        let piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
+        if (piece.reach > rightMm + overflowToleranceMm && lineHasWords) {
           if (!nextLine(ids[token.indices[i]] ?? token.indices[i], token.paragraph, false)) break outer;
-          piece = placeWord([token.plans[i]], [token.chars[i]], cursor, line);
+          piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
         }
         commit(token, piece, i);
       }
       continue;
     }
     commit(token, attempt);
+    writingOver = attempt.over;
   }
 
   // The end of the text, and anything cut off by the page limit, sits where the pen stopped.
@@ -526,7 +635,7 @@ export function layoutText(
   finishLine();
   for (let i = 0; i < carets.length; i++) if (!carets[i]) carets[i] = carets[i + 1] ?? carets[i - 1];
 
-  const decorations = decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed);
+  const decorations = [...decorate(text, ids, marks, runStyles, paragraphFormats, format.titleUnderline ?? false, carets, glyphByIndex, baseXh, seed), ...insertCarets];
   return { glyphs, missing, missingBoxes, decorations, carets, pageCount: pageIndex + 1, overflow, lineCount: lineIndex + 1 };
 }
 
@@ -559,17 +668,21 @@ function decorate(
     if (titleUnderline && decodeParagraph(paragraphs[paragraphAt[i]] ?? 0).style === "title") m |= UNDERLINE;
     return m;
   };
-  const kinds: [Decoration["kind"], number][] = [
-    ["highlight", HIGHLIGHT],
-    ["underline", UNDERLINE],
-    ["strike", STRIKE],
-    ["scribble", SCRIBBLE],
+  const flagged = (flag: number) => (i: number) => Boolean(effective(i) & flag);
+  const corrected = (kind: string) => (i: number) => correctionOf(marks[i] ?? 0) === kind;
+  const kinds: [Decoration["kind"], (i: number) => boolean][] = [
+    ["highlight", flagged(HIGHLIGHT)],
+    ["underline", flagged(UNDERLINE)],
+    ["strike", flagged(STRIKE)],
+    ["scribble", flagged(SCRIBBLE)],
+    ["tipex", corrected("tipex")],
+    ["erased", corrected("erase")],
   ];
   const styleAt = (i: number) => runStyleIndex(marks[i] ?? 0);
-  for (const [kind, flag] of kinds) {
+  for (const [kind, has] of kinds) {
     let i = 0;
     while (i < text.length) {
-      if (!(effective(i) & flag) || text[i] === "\n") {
+      if (!has(i) || text[i] === "\n") {
         i++;
         continue;
       }
@@ -584,7 +697,7 @@ function decorate(
           ? highlightColorIndex(marks[k] ?? 0) === highlightColorIndex(marks[i] ?? 0) &&
             highlightWords(k) === highlightWords(i) &&
             highlightRound(k) === highlightRound(i)
-          : styleAt(k) === styleAt(i) || /\s/.test(text[k]);
+          : kind === "tipex" || kind === "erased" || styleAt(k) === styleAt(i) || /\s/.test(text[k]);
       // Some people blot out or highlight word by word: then a space ends the line.
       const wordByWord = kind === "scribble" ? scribbleStyleOf(runStyles[styleAt(i) - 1]).perWord : kind === "highlight" && highlightWords(i);
       if (wordByWord && /\s/.test(text[i])) {
@@ -592,7 +705,7 @@ function decorate(
         continue;
       }
       const goesOn = (k: number) => !(wordByWord && /\s/.test(text[k]));
-      while (j + 1 < text.length && effective(j + 1) & flag && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line && sameInk(j + 1) && goesOn(j + 1)) j++;
+      while (j + 1 < text.length && has(j + 1) && text[j + 1] !== "\n" && carets[j + 1].line === carets[i].line && sameInk(j + 1) && goesOn(j + 1)) j++;
       let a = i;
       let b = j;
       while (a <= b && /\s/.test(text[a])) a++;

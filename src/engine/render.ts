@@ -662,6 +662,152 @@ const DEG = Math.PI / 180;
 /** Width of the highlighter's band, in x-heights. */
 const HIGHLIGHT_TIP = 1.65;
 
+/** What is left of letters rubbed out with an eraser: faint, soft, broken. */
+function rubbedOut(pen: PenModel): PenModel {
+  const graphite = pen.kind === "pencil";
+  return {
+    ...pen,
+    id: `${pen.id}-erased`,
+    opacity: pen.opacity * (graphite ? 0.3 : 0.42),
+    softnessMm: pen.softnessMm + 0.05,
+    grain: Math.min(1, pen.grain + 0.45),
+    edgeRoughness: pen.edgeRoughness + 0.3,
+    dryness: Math.max(pen.dryness ?? 0, 0.35),
+    buildsUp: false,
+  };
+}
+
+/** The ^ that marks where words written above the line go. */
+function caretMark(d: Decoration, pxPerMm: number): { x: number; y: number; p: number }[] {
+  const rng = createRng(deriveSeed(d.seed, "caret"));
+  const xh = d.xhMm;
+  const mid = (d.x0 + d.x1) / 2 + (rng.next() - 0.5) * 0.1 * xh;
+  const half = (d.x1 - d.x0) / 2 * (0.8 + 0.4 * rng.next());
+  const apex = d.y0 - (0.05 + 0.2 * rng.next()) * xh;
+  const foot = d.y0 + (0.5 + 0.25 * rng.next()) * xh;
+  const lean = (rng.next() - 0.5) * 0.15 * xh;
+  return [
+    { x: mid - half + lean, y: foot, p: 0.7 },
+    { x: mid - half * 0.45 + lean * 0.5, y: (foot + apex) / 2, p: 0.85 },
+    { x: mid, y: apex, p: 0.9 },
+    { x: mid + half * 0.45 - lean * 0.5, y: (foot + apex) / 2, p: 0.85 },
+    { x: mid + half - lean, y: foot + (rng.next() - 0.5) * 0.1 * xh, p: 0.65 },
+  ].map((p) => ({ x: p.x * pxPerMm, y: p.y * pxPerMm, p: p.p }));
+}
+
+/**
+ * Correction fluid over a run of words: two or three wavy brush passes of
+ * white, with a faint grey rim where the dried fluid stands up from the paper
+ * and a few brush marks inside. Drawn under the ink. Returns the area it covers.
+ */
+function drawTipex(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: number): InkBox | null {
+  const rng = createRng(deriveSeed(d.seed, "tipex"));
+  const xh = d.xhMm;
+  const slope = (d.y1 - d.y0) / Math.max(0.01, d.x1 - d.x0);
+  const baseAt = (x: number) => d.y0 + slope * (x - d.x0);
+  const left = d.x0 - (0.25 + 0.3 * rng.next()) * xh;
+  const right = d.x1 + (0.25 + 0.35 * rng.next()) * xh;
+  const top = -(1.5 + 0.3 * rng.next()) * xh;
+  const bottom = (0.5 + 0.25 * rng.next()) * xh;
+  const passes = rng.next() < 0.5 ? 2 : 3;
+  const thickness = ((bottom - top) / passes) * 1.45;
+  const pad = thickness;
+  const box = {
+    x: Math.floor((left - pad) * pxPerMm),
+    y: Math.floor((Math.min(baseAt(left), baseAt(right)) + top - pad) * pxPerMm),
+    width: Math.ceil((right - left + 2 * pad) * pxPerMm),
+    height: Math.ceil((bottom - top + Math.abs(baseAt(right) - baseAt(left)) + 2 * pad) * pxPerMm),
+  };
+  if (box.width <= 0 || box.height <= 0) return null;
+  const layer = createCanvas(box.width, box.height);
+  const l = layer.getContext("2d")!;
+  l.translate(-box.x, -box.y);
+  l.lineCap = "round";
+  l.lineJoin = "round";
+  const paths: Path2D[] = [];
+  for (let k = 0; k < passes; k++) {
+    const centre = top + (bottom - top) * ((k + 0.5) / passes) + (rng.next() - 0.5) * 0.12 * xh;
+    const wobble = noise1D(rng, 6);
+    const from = left + (rng.next() - 0.5) * 0.3 * xh;
+    const to = right + (rng.next() - 0.5) * 0.3 * xh;
+    const path = new Path2D();
+    const steps = Math.max(6, Math.ceil((to - from) / 1.2));
+    for (let i = 0; i <= steps; i++) {
+      const x = from + ((to - from) * i) / steps;
+      const y = baseAt(x) + centre + wobble(x) * 0.12 * xh;
+      if (i === 0) path.moveTo(x * pxPerMm, y * pxPerMm);
+      else path.lineTo(x * pxPerMm, y * pxPerMm);
+    }
+    paths.push(path);
+  }
+  l.lineWidth = thickness * pxPerMm;
+  l.strokeStyle = "#ffffff";
+  for (const path of paths) l.stroke(path);
+  // Brush marks: faint grey lines along the passes.
+  l.globalCompositeOperation = "source-atop";
+  l.lineWidth = Math.max(0.5, 0.05 * pxPerMm);
+  for (let s = 0; s < 6 + passes * 3; s++) {
+    const y = (Math.min(baseAt(left), baseAt(right)) + top + (bottom - top) * rng.next()) * pxPerMm;
+    l.strokeStyle = `rgba(110,110,110,${(0.04 + 0.05 * rng.next()).toFixed(3)})`;
+    l.beginPath();
+    l.moveTo((left + rng.next() * 0.3 * (right - left)) * pxPerMm, y);
+    l.lineTo((right - rng.next() * 0.3 * (right - left)) * pxPerMm, y + (rng.next() - 0.5) * 0.4 * pxPerMm);
+    l.stroke();
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-over";
+  ctx.drawImage(layer, box.x, box.y);
+  // The rim: the same shape in grey, a hair lower and to the right, softened.
+  ctx.filter = `blur(${Math.max(0.4, 0.06 * pxPerMm).toFixed(2)}px)`;
+  ctx.globalAlpha = 0.22;
+  const rim = createCanvas(box.width, box.height);
+  const r = rim.getContext("2d")!;
+  r.drawImage(layer, 0, 0);
+  r.globalCompositeOperation = "source-in";
+  r.fillStyle = "#6f6f6f";
+  r.fillRect(0, 0, box.width, box.height);
+  ctx.drawImage(rim, box.x + 0.1 * pxPerMm, box.y + 0.16 * pxPerMm);
+  ctx.restore();
+  layer.width = 0;
+  rim.width = 0;
+  return box;
+}
+
+/** An eraser rubbed over pencil: a faint, streaky grey haze of spread graphite. */
+function drawEraserHaze(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: number): InkBox | null {
+  const rng = createRng(deriveSeed(d.seed, "eraser"));
+  const xh = d.xhMm;
+  const slope = (d.y1 - d.y0) / Math.max(0.01, d.x1 - d.x0);
+  const left = d.x0 - 0.4 * xh;
+  const right = d.x1 + 0.4 * xh;
+  const [r, g, b] = parseHex(PENCIL_COLOR);
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-over";
+  ctx.filter = `blur(${Math.max(0.6, 0.25 * pxPerMm).toFixed(2)}px)`;
+  ctx.lineCap = "round";
+  // The eraser goes back and forth at a slant: short, uneven rubs, some heavier.
+  const rubs = 7 + Math.floor(rng.next() * 6);
+  for (let k = 0; k < rubs; k++) {
+    const cx = left + (right - left) * rng.next();
+    const cy = d.y0 + slope * (cx - d.x0) + (-1.2 + 1.5 * rng.next()) * xh;
+    const length = (0.6 + 1.6 * rng.next()) * xh;
+    const angle = (rng.next() - 0.5) * 1.2;
+    ctx.strokeStyle = `rgba(${r},${g},${b},${(0.025 + 0.045 * rng.next()).toFixed(3)})`;
+    ctx.lineWidth = (0.3 + 0.5 * rng.next()) * xh * pxPerMm;
+    ctx.beginPath();
+    ctx.moveTo((cx - Math.cos(angle) * length) * pxPerMm, (cy - Math.sin(angle) * length) * pxPerMm);
+    ctx.lineTo((cx + Math.cos(angle) * length) * pxPerMm, (cy + Math.sin(angle) * length) * pxPerMm);
+    ctx.stroke();
+  }
+  ctx.restore();
+  return {
+    x: Math.floor(left * pxPerMm),
+    y: Math.floor((d.y0 - 2 * xh) * pxPerMm),
+    width: Math.ceil((right - left) * pxPerMm),
+    height: Math.ceil(3 * xh * pxPerMm),
+  };
+}
+
 /** How far one sweep of the highlighter goes before the hand is lifted, in millimetres. */
 const SWEEP_MM = [30, 70];
 
@@ -813,11 +959,12 @@ export function renderPage(
     strokes: StrokeGeometry[];
   }
   const groups = new Map<string, InkGroup>();
-  const groupFor = (style: number): InkGroup => {
+  const groupFor = (style: number, erased = false): InkGroup => {
     const run = style > 0 ? runStyles[style - 1] : undefined;
-    const groupPen = wornPen(run?.penId ? penById(run.penId) : pen, options.wear ?? 0);
+    const used = wornPen(run?.penId ? penById(run.penId) : pen, options.wear ?? 0);
+    const groupPen = erased ? rubbedOut(used) : used;
     const color = groupPen.kind === "pencil" ? PENCIL_COLOR : (run?.color ?? options.color);
-    const key = `${groupPen.id}|${color}`;
+    const key = `${groupPen.id}|${color}|${erased ? "erased" : "ink"}`;
     let group = groups.get(key);
     if (!group) {
       group = { pen: groupPen, color, strokes: [] };
@@ -828,6 +975,8 @@ export function renderPage(
 
   // Geometry of every stroke on this page: letters (bold ones twice) and hand-drawn lines.
   const highlights: { geometry: StrokeGeometry; color: number; smear: number; seed: number }[] = [];
+  /** Correction fluid and eraser marks, drawn under the ink. */
+  const corrections: { d: Decoration; graphite: boolean }[] = [];
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -849,7 +998,7 @@ export function renderPage(
     if (glyph.page !== options.pageIndex) continue;
     const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
     if (!variant) continue;
-    const group = groupFor(glyph.style ?? 0);
+    const group = groupFor(glyph.style ?? 0, Boolean(glyph.erased));
     // Bold: the writer goes over the letter again, a hair off the first pass.
     const passes = glyph.bold ? 2 : 1;
     const boldRng = createRng(deriveSeed(glyph.seed, "bold"));
@@ -872,6 +1021,15 @@ export function renderPage(
   for (const d of layout.decorations) {
     if (d.page !== options.pageIndex) continue;
     const rng = createRng(deriveSeed(d.seed, "ink"));
+    if (d.kind === "tipex" || d.kind === "erased") {
+      corrections.push({ d, graphite: groupFor(d.style ?? 0).pen.kind === "pencil" });
+      continue;
+    }
+    if (d.kind === "caret") {
+      const group = groupFor(d.style ?? 0);
+      include(group, strokeGeometry(caretMark(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed);
+      continue;
+    }
     if (d.kind === "scribble") {
       const group = groupFor(d.style ?? 0);
       const look = scribbleStyleOf(d.style > 0 ? runStyles[d.style - 1] : undefined);
@@ -1127,6 +1285,13 @@ export function renderPage(
     ctx.drawImage(layer, 0, 0);
     ctx.restore();
     layer.width = 0;
+  }
+
+  // 2b. Corrections under the ink: correction fluid hides the paper's lines
+  // too; an eraser leaves a faint grey haze of graphite.
+  for (const { d, graphite } of corrections) {
+    const area = d.kind === "tipex" ? drawTipex(ctx, d, pxPerMm) : graphite ? drawEraserHaze(ctx, d, pxPerMm) : null;
+    fullBox = unionBox(fullBox, area ? clampBox(area, canvas.width, canvas.height) : null, canvas.width, canvas.height);
   }
 
   // 3. Paper lines, then the paper itself (on screen and in the PDF).

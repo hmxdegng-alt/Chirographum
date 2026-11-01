@@ -13,6 +13,8 @@ import {
   applyRunStyle,
   BOLD,
   clearFlags,
+  correctionOf,
+  CORRECTIONS,
   decodeParagraph,
   diffTexts,
   encodeParagraph,
@@ -36,9 +38,11 @@ import {
   updateMarks,
   updateParagraphs,
   upgradeMarkV1,
+  withCorrection,
   withHighlightColor,
   withRunStyle,
   type Alignment,
+  type Correction,
   type ParagraphStyle,
   type RunStyle,
   type ScribbleKind,
@@ -239,6 +243,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Marks chosen with the cursor still (Ctrl+B and then typing). */
   let pendingMarks: number | null = null;
   let highlightColor = loadPreference("sheet.highlightColor", 0);
+  /** The correction the main button makes (the last one chosen in its menu). */
+  let lastCorrection = loadPreference<Correction>("sheet.lastCorrection", "tipex");
+  if (!CORRECTIONS.includes(lastCorrection)) lastCorrection = "tipex";
   /** Highlight word by word (the hand lifted at every space), remembered for the next time. */
   let highlightWords = loadPreference("sheet.highlightWords", false);
   /** Round ends (a worn or bullet tip) instead of the chisel's square ones. */
@@ -253,8 +260,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** Marks a typed character takes: those of the letter before it (or after, at a paragraph start). */
   const marksAt = (index: number): number => {
     if (pendingMarks !== null) return pendingMarks;
-    if (index > 0 && lastText[index - 1] !== "\n") return marks[index - 1] ?? 0;
-    if (index < lastText.length && lastText[index] !== "\n") return marks[index] ?? 0;
+    // A correction belongs to the letters it was made on: what is typed next is plain writing.
+    if (index > 0 && lastText[index - 1] !== "\n") return withCorrection(marks[index - 1] ?? 0, null);
+    if (index < lastText.length && lastText[index] !== "\n") return withCorrection(marks[index] ?? 0, null);
     return 0;
   };
 
@@ -451,6 +459,27 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     });
   }
 
+  /** Corrects the selection (or what is typed next) in one of the hand-made ways; null removes it. */
+  function correct(kind: Correction | null): void {
+    if (kind) {
+      lastCorrection = kind;
+      savePreference("sheet.lastCorrection", kind);
+    }
+    const { start, end } = editor.selection();
+    if (start === end) {
+      pendingMarks = withCorrection(marksAt(start), kind);
+      updateToolbar();
+      return;
+    }
+    changeFormatting(() => (marks = marks.map((m, i) => (i >= start && i < end ? withCorrection(m, kind) : m))));
+  }
+
+  /** The correction of the selection's first letter (or of what will be typed). */
+  const selectionCorrection = (): Correction | null => {
+    const { start, end } = editor.selection();
+    return correctionOf(end > start ? (marks[start] ?? 0) : marksAt(start));
+  };
+
   /** Paragraphs the selection covers from start to end (only those lose their style when formatting is cleared). */
   function wholeParagraphs(start: number, end: number): number[] {
     const result: number[] = [];
@@ -511,7 +540,9 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       const on = start === end ? !(marksAt(start) & HIGHLIGHT) : !rangeHasMark(lastText, marks, start, end, HIGHLIGHT);
       if (on) highlightOut({});
       else toggleFlag(HIGHLIGHT, highlightColor, false);
-    } else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
+    } else if (command === "format:correct") correct(selectionCorrection() ? null : lastCorrection);
+    else if (kind === "correct") correct((CORRECTIONS as readonly string[]).includes(value) ? (value as Correction) : null);
+    else if (kind === "highlight-words") highlightOut({ perWord: value === "1" });
     else if (kind === "highlight-ends") highlightOut({ round: value === "round" });
     else if (command === "format:scribble") {
       const { start, end } = editor.selection();
@@ -619,6 +650,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       scribbleStyle: has(SCRIBBLE) ? scribbleStyleOf(selected) : lastScribble,
       highlightWords: has(HIGHLIGHT) ? Boolean(selected.highlightWords) : highlightWords,
       highlightRound: has(HIGHLIGHT) ? Boolean(selected.highlightRound) : highlightRound,
+      correction: selectionCorrection(),
       highlightColor: collapsed && marksAt(start) & HIGHLIGHT ? highlightColorIndex(marksAt(start)) : highlightColor,
     });
   }
