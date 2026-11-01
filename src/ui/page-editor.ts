@@ -19,8 +19,12 @@ export interface PageEditor {
   root: HTMLElement;
   pages(): HTMLCanvasElement[];
   text(): string;
-  /** Replaces the whole text (opening a document); the cursor goes to the start. */
-  setText(text: string): void;
+  /** Replaces the whole text (opening a document, undo); the cursor goes to `start`–`end`. */
+  setText(text: string, start?: number, end?: number): void;
+  selection(): { start: number; end: number };
+  setSelection(start: number, end: number): void;
+  /** True while the cursor is in the page. */
+  hasFocus(): boolean;
   /** New layout (after typing or a settings change). */
   setLayout(layout: LayoutResult, page: PageSettings): void;
   /** CSS pixels per millimetre on screen. */
@@ -31,7 +35,44 @@ export interface PageEditor {
 
 export interface PageEditorOptions {
   initialText: string;
-  onInput: (text: string) => void;
+  /** The text changed; `before` is the selection just before the change. */
+  onInput: (text: string, before: { start: number; end: number }) => void;
+  /** The cursor or the selection moved (not by typing). */
+  onSelectionChange?: (start: number, end: number) => void;
+  /** Keyboard commands: undo, redo and formatting shortcuts. */
+  onCommand?: (command: string) => void;
+}
+
+/** Formatting shortcuts, as in the most common word processors. */
+function shortcutCommand(event: KeyboardEvent): string | null {
+  const ctrl = event.ctrlKey || event.metaKey;
+  if (!ctrl && !(event.altKey && event.shiftKey)) return null;
+  const key = event.key.toLowerCase();
+  const code = event.code;
+  if (ctrl && !event.altKey) {
+    if (key === "z" && !event.shiftKey) return "undo";
+    if ((key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey)) return "redo";
+    if (!event.shiftKey) {
+      if (key === "b") return "format:bold";
+      if (key === "i") return "format:italic";
+      if (key === "u") return "format:underline";
+      if (key === "\\" || code === "Backslash") return "format:clear";
+    } else {
+      if (key === "l") return "align:left";
+      if (key === "e") return "align:center";
+      if (key === "r") return "align:right";
+      if (key === "h") return "format:highlight";
+    }
+  }
+  if (ctrl && event.altKey && !event.shiftKey) {
+    const digit = code.startsWith("Digit") ? code.slice(5) : code.startsWith("Numpad") ? code.slice(6) : "";
+    if (digit === "0") return "style:normal";
+    if (digit === "1") return "style:h1";
+    if (digit === "2") return "style:h2";
+    if (digit === "3") return "style:h3";
+  }
+  if (!ctrl && event.altKey && event.shiftKey && (code === "Digit5" || key === "5" || key === "%")) return "format:strike";
+  return null;
 }
 
 const WORD_CHAR = /[\p{L}\p{N}_'’-]/u;
@@ -226,6 +267,13 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
 
   // ----- Keyboard: what a plain text box cannot know (wrapped lines on the page) -----
   input.addEventListener("keydown", (event) => {
+    const command = shortcutCommand(event);
+    if (command) {
+      // Undo is the document's own (text and formatting), never the text box's.
+      event.preventDefault();
+      options.onCommand?.(command);
+      return;
+    }
     const all = stops();
     if (all.length === 0) return;
     const focus = focusIndex();
@@ -267,11 +315,31 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
     revealCaret = true;
     requestAnimationFrame(drawOverlay);
   });
+  // The selection just before a change, for undo.
+  let beforeInput = { start: 0, end: 0 };
+  let typing = false;
+  input.addEventListener("beforeinput", (event) => {
+    if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+      event.preventDefault();
+      options.onCommand?.(event.inputType === "historyUndo" ? "undo" : "redo");
+      return;
+    }
+    beforeInput = { start: input.selectionStart, end: input.selectionEnd };
+  });
   input.addEventListener("input", () => {
     goalX = null;
     revealCaret = true;
-    options.onInput(input.value);
+    typing = true;
+    options.onInput(input.value, beforeInput);
+    queueMicrotask(() => (typing = false));
   });
+  let lastSelection = "";
+  const reportSelection = () => {
+    const key = `${input.selectionStart}:${input.selectionEnd}`;
+    if (key === lastSelection) return;
+    lastSelection = key;
+    if (!typing) options.onSelectionChange?.(input.selectionStart, input.selectionEnd);
+  };
   input.addEventListener("select", () => drawOverlay());
   input.addEventListener("focus", () => drawOverlay());
   input.addEventListener("blur", () => drawOverlay());
@@ -281,6 +349,7 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
 
   // ----- Cursor, selection and missing letters on top of the pages -----
   function drawOverlay(): void {
+    reportSelection();
     if (!layout || !pageSettings) return;
     const all = stops();
     const xh = pageSettings.xHeightMm;
@@ -374,13 +443,25 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
     root,
     pages: () => pageElements.map((p) => p.canvas),
     text: () => input.value,
-    setText(text) {
+    setText(text, start, end) {
       input.value = text;
-      input.setSelectionRange(0, 0);
       goalX = null;
-      const scroller = root.parentElement;
-      if (scroller) scroller.scrollTop = 0;
+      if (start === undefined) {
+        input.setSelectionRange(0, 0);
+        const scroller = root.parentElement;
+        if (scroller) scroller.scrollTop = 0;
+      } else {
+        input.setSelectionRange(start, end ?? start);
+        revealCaret = true;
+      }
     },
+    selection: () => ({ start: input.selectionStart, end: input.selectionEnd }),
+    setSelection(start, end) {
+      input.setSelectionRange(start, end);
+      revealCaret = true;
+      drawOverlay();
+    },
+    hasFocus: () => document.activeElement === input,
     setLayout(next, settings) {
       layout = next;
       pageSettings = settings;

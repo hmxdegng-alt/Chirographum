@@ -90,7 +90,7 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
     async new() {
       if (!(await confirmDiscard())) return;
       // A blank page with the same pen and look, written in a new version.
-      show({ text: "", charIds: [], settings: { ...sheet.currentSettings(), seed: freshSeed() } }, null, null);
+      show({ text: "", charIds: [], marks: [], paragraphs: [0], settings: { ...sheet.currentSettings(), seed: freshSeed() } }, null, null);
     },
     async open() {
       if (!(await confirmDiscard())) return;
@@ -122,7 +122,7 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
           // A damaged snapshot: keep what is there.
         }
       } else {
-        sheet.loadDocument({ text: "", charIds: [], settings: sheet.currentSettings() });
+        sheet.loadDocument({ text: "", charIds: [], marks: [], paragraphs: [0], settings: sheet.currentSettings() });
       }
       dirty = false;
       update();
@@ -137,9 +137,21 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
     },
   };
 
-  bridge.onMenuCommand((command) => void commands[command]?.());
+  bridge.onMenuCommand((command) => {
+    if (commands[command]) {
+      void commands[command]();
+      return;
+    }
+    // Undo and redo on "Tu letra" act on the text box being edited there.
+    if (store.get().tab !== "sheet" && (command === "undo" || command === "redo")) {
+      document.execCommand(command);
+      return;
+    }
+    sheet.command(command);
+  });
   // The same commands for automated tests (they cannot click the native menu).
-  (window as unknown as { chirographumCommand?: (command: string) => Promise<void> | void }).chirographumCommand = (command) => commands[command]?.();
+  (window as unknown as { chirographumCommand?: (command: string) => Promise<void> | void }).chirographumCommand = (command) =>
+    commands[command] ? commands[command]() : void sheet.command(command);
   update();
   // A document double-clicked in the Explorer.
   void commands.openPending();

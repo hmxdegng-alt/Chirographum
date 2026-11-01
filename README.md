@@ -6,11 +6,14 @@ Editor de texto que escribe e imprime con **tu propia letra**. La meta: enseñar
 
 *A text editor that writes and prints in your own handwriting. Free and open source (AGPL-3.0). Interface in Spanish until version 1.0.*
 
-## Estado: Fase 1 · versión de prueba
+## Estado: Fase 1 completa · versión de prueba
 
 - **Tu letra:** dibuja con el ratón, el trackpad o un lápiz digital cada letra varias veces. Cada letra aparece en varios huecos con una letra fantasma de guía; pulsa **Intro** para guardarlos todos. Con **Ctrl + rueda** haces zoom.
 - **Hoja:** haz clic en la hoja y escribe directamente, como en un procesador de textos: cursor, selección con el ratón, flechas, Inicio/Fin, copiar, pegar y deshacer. Cuando una página se llena, el texto sigue en la siguiente. Cada letra conserva su dibujo mientras escribes alrededor (si te gusta el efecto de «letras vivas», actívalo en *Ver › Animaciones mientras se escribe*).
-- **Instrumentos:** gel 0,7 y 0,5, bola, rotulador fino y mediano (la tinta se oscurece al cruzarse, como en la realidad), lápiz HB y portaminas. Ajustados con escaneos de escritura real.
+- **Formato, como en un procesador de textos** (barra de herramientas, menú *Formato* y atajos): estilos Texto normal, Título, Subtítulo y Encabezados 1 a 3; negrita (la letra repasada), cursiva (más inclinada), subrayado y tachado dibujados a mano, resaltado con fosforito de cinco colores y alineación a la izquierda, centro o derecha. Deshacer y rehacer incluyen el formato.
+- **Regla** sobre la hoja con los márgenes izquierdo y derecho arrastrables.
+- **Papel:** folio en blanco, rayado, cuadrícula de 4 y 5 mm o punteado, con margen rojo y papel crema opcionales; el texto se apoya en las rayas. Las líneas se imprimen o, si escribes sobre un cuaderno real, solo se ven en pantalla.
+- **Instrumentos:** gel 0,7 y 0,5, bola, rotulador fino y mediano (la tinta se oscurece al cruzarse, como en la realidad), lápiz HB, lápiz 3H y portaminas. Ajustados con escaneos de escritura real.
 - **Naturalidad:** tamaño, rotación, inclinación, líneas que se tuercen o suben, margen que se desplaza, letra que encoge al llegar al borde, textura de la tinta y boli que falla. Presets *Cuidadoso*, *Normal* y *Con prisa*, y un botón **Aleatorio**.
 - **Vista impresa** (botón sobre la hoja o menú *Ver*): imita cómo deja la tinta una impresora de chorro, calibrada con el escaneo de una hoja impresa.
 - **Imprimir o exportar a PDF** a tamaño real (A4, 600 ppp), todas las páginas.

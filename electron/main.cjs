@@ -118,7 +118,7 @@ function buildMenu() {
         { label: "Guardar como…", accelerator: "CmdOrCtrl+Shift+S", click: () => sendCommand("saveAs") },
         { type: "separator" },
         { label: "Imprimir…", accelerator: "CmdOrCtrl+P", click: () => sendCommand("print") },
-        { label: "Exportar PDF…", accelerator: "CmdOrCtrl+Shift+E", click: () => sendCommand("exportPdf") },
+        { label: "Exportar PDF…", click: () => sendCommand("exportPdf") },
         { type: "separator" },
         { role: "quit", label: "Salir" },
       ],
@@ -126,13 +126,45 @@ function buildMenu() {
     {
       label: "Editar",
       submenu: [
-        { role: "undo", label: "Deshacer" },
-        { role: "redo", label: "Rehacer" },
+        // The page handles these keys itself (text and formatting); the menu only shows them.
+        { label: "Deshacer", accelerator: "CmdOrCtrl+Z", registerAccelerator: false, click: () => sendCommand("undo") },
+        { label: "Rehacer", accelerator: "CmdOrCtrl+Y", registerAccelerator: false, click: () => sendCommand("redo") },
         { type: "separator" },
         { role: "cut", label: "Cortar" },
         { role: "copy", label: "Copiar" },
         { role: "paste", label: "Pegar" },
         { role: "selectAll", label: "Seleccionar todo" },
+      ],
+    },
+    {
+      label: "Formato",
+      submenu: [
+        { label: "Negrita", accelerator: "CmdOrCtrl+B", registerAccelerator: false, click: () => sendCommand("format:bold") },
+        { label: "Cursiva", accelerator: "CmdOrCtrl+I", registerAccelerator: false, click: () => sendCommand("format:italic") },
+        { label: "Subrayado", accelerator: "CmdOrCtrl+U", registerAccelerator: false, click: () => sendCommand("format:underline") },
+        { label: "Tachado", accelerator: "Alt+Shift+5", registerAccelerator: false, click: () => sendCommand("format:strike") },
+        { label: "Resaltar", accelerator: "CmdOrCtrl+Shift+H", registerAccelerator: false, click: () => sendCommand("format:highlight") },
+        { label: "Borrar formato", accelerator: "CmdOrCtrl+\\", registerAccelerator: false, click: () => sendCommand("format:clear") },
+        { type: "separator" },
+        {
+          label: "Estilos de párrafo",
+          submenu: [
+            { label: "Texto normal", accelerator: "CmdOrCtrl+Alt+0", registerAccelerator: false, click: () => sendCommand("style:normal") },
+            { label: "Título", click: () => sendCommand("style:title") },
+            { label: "Subtítulo", click: () => sendCommand("style:subtitle") },
+            { label: "Encabezado 1", accelerator: "CmdOrCtrl+Alt+1", registerAccelerator: false, click: () => sendCommand("style:h1") },
+            { label: "Encabezado 2", accelerator: "CmdOrCtrl+Alt+2", registerAccelerator: false, click: () => sendCommand("style:h2") },
+            { label: "Encabezado 3", accelerator: "CmdOrCtrl+Alt+3", registerAccelerator: false, click: () => sendCommand("style:h3") },
+          ],
+        },
+        {
+          label: "Alinear",
+          submenu: [
+            { label: "Izquierda", accelerator: "CmdOrCtrl+Shift+L", registerAccelerator: false, click: () => sendCommand("align:left") },
+            { label: "Centro", accelerator: "CmdOrCtrl+Shift+E", registerAccelerator: false, click: () => sendCommand("align:center") },
+            { label: "Derecha", accelerator: "CmdOrCtrl+Shift+R", registerAccelerator: false, click: () => sendCommand("align:right") },
+          ],
+        },
       ],
     },
     {

@@ -2,7 +2,8 @@
 // (so it looks exactly the same when opened again) and the sheet settings.
 // It is written with whatever hand is loaded; the hand is its own file.
 
-import type { Naturalness, PageSettings } from "./settings";
+import { decodeBytes, encodeBytes, paragraphCount } from "./rich-text";
+import { DEFAULT_PAPER, type Naturalness, type PageSettings, type PaperKind, type PaperSettings } from "./settings";
 
 export const DOCUMENT_FORMAT = "chirographum-document";
 export const DOCUMENT_VERSION = 1;
@@ -21,11 +22,18 @@ export interface SheetSettings {
   presetId: string;
   naturalness: Naturalness;
   seed: number;
+  paper: PaperSettings;
+  /** Titles get a line drawn under them. */
+  titleUnderline: boolean;
 }
 
 export interface ChiroDocument {
   text: string;
   charIds: number[];
+  /** Bold, italic, underline… of every character. */
+  marks: number[];
+  /** Style and alignment of every paragraph. */
+  paragraphs: number[];
   settings: SheetSettings;
 }
 
@@ -61,6 +69,8 @@ export function serializeDocument(doc: ChiroDocument): string {
       version: DOCUMENT_VERSION,
       text: doc.text,
       charIds: encodeIds(doc.charIds),
+      marks: encodeBytes(doc.marks),
+      paragraphs: doc.paragraphs,
       settings: doc.settings,
     },
     null,
@@ -97,7 +107,21 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
   }
   if (charIds.length !== text.length) charIds = [];
 
+  let marks: number[] = [];
+  if (typeof data.marks === "string") {
+    try {
+      marks = decodeBytes(data.marks);
+    } catch {
+      marks = [];
+    }
+  }
+  if (marks.length !== text.length) marks = new Array<number>(text.length).fill(0);
+  let paragraphs = Array.isArray(data.paragraphs) ? data.paragraphs.map((v) => (typeof v === "number" && Number.isFinite(v) ? v & 31 : 0)) : [];
+  if (paragraphs.length !== paragraphCount(text)) paragraphs = new Array<number>(paragraphCount(text)).fill(0);
+
   const raw = isObject(data.settings) ? data.settings : {};
+  const rawPaper = isObject(raw.paper) ? raw.paper : {};
+  const kinds: PaperKind[] = ["blank", "lined", "grid4", "grid5", "dots"];
   const settings: SheetSettings = {
     penId: typeof raw.penId === "string" ? raw.penId : defaults.penId,
     inkColor: typeof raw.inkColor === "string" && /^#[0-9a-f]{6}$/i.test(raw.inkColor) ? raw.inkColor : defaults.inkColor,
@@ -106,8 +130,16 @@ export function parseDocument(json: string, defaults: SheetSettings): ChiroDocum
     presetId: typeof raw.presetId === "string" ? raw.presetId : defaults.presetId,
     naturalness: { ...defaults.naturalness, ...(numbersOnly(raw.naturalness) ? (raw.naturalness as Partial<Naturalness>) : {}) },
     seed: typeof raw.seed === "number" && Number.isFinite(raw.seed) ? raw.seed >>> 0 : defaults.seed,
+    paper: {
+      kind: kinds.includes(rawPaper.kind as PaperKind) ? (rawPaper.kind as PaperKind) : (defaults.paper ?? DEFAULT_PAPER).kind,
+      lineSpacingMm: typeof rawPaper.lineSpacingMm === "number" ? rawPaper.lineSpacingMm : (defaults.paper ?? DEFAULT_PAPER).lineSpacingMm,
+      marginLine: typeof rawPaper.marginLine === "boolean" ? rawPaper.marginLine : (defaults.paper ?? DEFAULT_PAPER).marginLine,
+      color: rawPaper.color === "cream" || rawPaper.color === "white" ? rawPaper.color : (defaults.paper ?? DEFAULT_PAPER).color,
+      print: typeof rawPaper.print === "boolean" ? rawPaper.print : (defaults.paper ?? DEFAULT_PAPER).print,
+    },
+    titleUnderline: typeof raw.titleUnderline === "boolean" ? raw.titleUnderline : defaults.titleUnderline,
   };
-  return { text, charIds, settings };
+  return { text, charIds, marks, paragraphs, settings };
 }
 
 /** File name without folder or extension, for the window title. */

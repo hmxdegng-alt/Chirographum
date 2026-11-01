@@ -15,6 +15,20 @@ import {
 import { editedWordRange, updateCharIds } from "../src/engine/char-ids";
 import { decodeIds, documentTitle, DocumentFormatError, encodeIds, parseDocument, serializeDocument } from "../src/engine/document";
 import { glyphPointToPage, layoutText } from "../src/engine/layout";
+import {
+  BOLD,
+  decodeBytes,
+  decodeParagraph,
+  encodeBytes,
+  encodeParagraph,
+  HIGHLIGHT,
+  highlightColorIndex,
+  rangeHasMark,
+  setMark,
+  UNDERLINE,
+  updateMarks,
+  updateParagraphs,
+} from "../src/engine/rich-text";
 import { createRng, deriveSeed } from "../src/engine/random";
 import { A4, presetById, randomNaturalness } from "../src/engine/settings";
 
@@ -218,7 +232,7 @@ describe("layout", () => {
   });
 
   it("maps glyph points onto the page with y growing downwards", () => {
-    const glyph = { char: "a", variantIndex: 0, page: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1 };
+    const glyph = { char: "a", variantIndex: 0, page: 0, xMm: 50, yMm: 100, scale: 1, rotation: 0, shear: 0, offsetX: 0, seed: 1, index: 0, widthMm: 1, bold: false };
     expect(glyphPointToPage(glyph, 3, 0, 1)).toEqual({ x: 50, y: 97 });
   });
 });
@@ -277,6 +291,8 @@ describe("documents", () => {
     presetId: "normal",
     naturalness: presetById("normal").values,
     seed: 42,
+    paper: { kind: "blank" as const, lineSpacingMm: 8, marginLine: false, color: "white" as const, print: true },
+    titleUnderline: true,
   };
 
   it("keeps letter identities exactly", () => {
@@ -289,7 +305,9 @@ describe("documents", () => {
     const doc = {
       text: "Querida Marta:\n\n¿Cuándo vienes?",
       charIds: Array.from({ length: 31 }, (_, i) => (i * 2654435761) >>> 0),
-      settings: { ...defaults, penId: "fineliner", seed: 7, page: { ...A4, xHeightMm: 4 } },
+      marks: Array.from({ length: 31 }, (_, i) => (i % 5 === 0 ? BOLD | UNDERLINE : 0)),
+      paragraphs: [encodeParagraph({ style: "title", align: "center" }), 0, 0],
+      settings: { ...defaults, penId: "fineliner", seed: 7, page: { ...A4, xHeightMm: 4 }, paper: { ...defaults.paper, kind: "lined" as const } },
     };
     expect(doc.text.length).toBe(31);
     expect(parseDocument(serializeDocument(doc), defaults)).toEqual(doc);
@@ -303,6 +321,9 @@ describe("documents", () => {
     expect(doc.settings.naturalness.lineSlope).toBe(0);
     expect(doc.settings.page).toEqual(A4);
     expect(doc.charIds).toEqual([]);
+    expect(doc.marks).toEqual([0, 0, 0, 0]);
+    expect(doc.paragraphs).toEqual([0]);
+    expect(doc.settings.paper.kind).toBe("blank");
   });
 
   it("rejects files that are not documents", () => {
@@ -314,5 +335,82 @@ describe("documents", () => {
   it("shows the file name without folder or extension", () => {
     expect(documentTitle("C:\\Users\\andre\\Carta a Marta.chiro")).toBe("Carta a Marta");
     expect(documentTitle(null)).toBeNull();
+  });
+});
+
+describe("formatting", () => {
+  const title = encodeParagraph({ style: "title", align: "center" });
+  const normal = encodeParagraph({ style: "normal", align: "left" });
+
+  it("typed letters take the marks at the cursor; the rest keep theirs", () => {
+    expect(updateMarks("hola", [0, BOLD, BOLD, 0], "hoXla", BOLD)).toEqual([0, BOLD, BOLD, BOLD, 0]);
+    expect(updateMarks("hola", [0, BOLD, BOLD, 0], "ha", 0)).toEqual([0, 0]);
+  });
+
+  it("Enter at the end of a title continues with normal text", () => {
+    expect(updateParagraphs("Título", [title], "Título\n")).toEqual([title, normal]);
+  });
+
+  it("Enter inside a title keeps both halves as title", () => {
+    expect(updateParagraphs("Título", [title], "Tít\nulo")).toEqual([title, title]);
+  });
+
+  it("joining two paragraphs keeps the first one's format", () => {
+    expect(updateParagraphs("Título\nTexto", [title, normal], "TítuloTexto")).toEqual([title]);
+    expect(updateParagraphs("uno\ndos\ntres", [normal, title, normal], "uno\ndos\ntres!")).toEqual([normal, title, normal]);
+  });
+
+  it("toggles marks on a range and reads them back", () => {
+    let marks = [0, 0, 0, 0, 0];
+    marks = setMark(marks, 0, 5, UNDERLINE, true);
+    expect(rangeHasMark("ab cd", marks, 0, 5, UNDERLINE)).toBe(true);
+    marks = setMark(marks, 0, 2, UNDERLINE, false);
+    expect(rangeHasMark("ab cd", marks, 0, 5, UNDERLINE)).toBe(false);
+    marks = setMark(marks, 3, 5, HIGHLIGHT, true, 2);
+    expect(highlightColorIndex(marks[4])).toBe(2);
+    expect(decodeBytes(encodeBytes(marks))).toEqual(marks);
+    expect(decodeParagraph(title)).toEqual({ style: "title", align: "center" });
+  });
+});
+
+describe("styled layout", () => {
+  const hand = syntheticHand("unodstrecaiflhvzTíu");
+  const nat = { ...presetById("normal").values, marginDrift: 0, lineDrift: 0, lineSlope: 0 };
+  const center = encodeParagraph({ style: "title", align: "center" });
+  const normal = encodeParagraph({ style: "normal", align: "left" });
+
+  it("titles are bigger and centred, the text below is normal", () => {
+    const text = "Título\nuno dos tres";
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { paragraphs: [center, normal] });
+    const titleGlyphs = r.glyphs.filter((g) => g.index < 6);
+    const bodyGlyphs = r.glyphs.filter((g) => g.index > 6);
+    const avg = (gs: typeof r.glyphs) => gs.reduce((s, g) => s + g.scale, 0) / gs.length;
+    expect(avg(titleGlyphs)).toBeGreaterThan(avg(bodyGlyphs) * 1.6);
+    const left = Math.min(...titleGlyphs.map((g) => g.xMm));
+    const right = Math.max(...titleGlyphs.map((g) => g.xMm + g.widthMm));
+    const middle = (A4.marginLeftMm + A4.widthMm - A4.marginRightMm) / 2;
+    expect(Math.abs((left + right) / 2 - middle)).toBeLessThan(0.5);
+    expect(bodyGlyphs[0].xMm).toBeCloseTo(A4.marginLeftMm, 5);
+  });
+
+  it("underline and highlighter become one stroke per line, without the spaces at the ends", () => {
+    const text = "uno dos tres";
+    const marks = Array.from(text, (_, i) => (i >= 4 ? UNDERLINE | HIGHLIGHT : 0));
+    const r = layoutText(text, hand, A4, nat, 3, undefined, { marks });
+    expect(r.decorations.map((d) => d.kind).sort()).toEqual(["highlight", "underline"]);
+    const u = r.decorations.find((d) => d.kind === "underline")!;
+    expect(u.x0).toBeCloseTo(r.carets[4].xMm, 5);
+    expect(u.x1).toBeGreaterThan(r.carets[11].xMm);
+  });
+
+  it("on lined paper every baseline sits on a line", () => {
+    const paper = { kind: "lined" as const, lineSpacingMm: 8, marginLine: false, color: "white" as const, print: true };
+    const r = layoutText("uno dos tres cuatro cinco ".repeat(30), hand, A4, nat, 3, undefined, { paper });
+    const lines = new Set(r.carets.map((c) => c.line));
+    for (const line of lines) {
+      const stop = r.carets.find((c) => c.line === line)!;
+      const k = (stop.yMm - 20) / 8;
+      expect(Math.abs(k - Math.round(k))).toBeLessThan(0.15);
+    }
   });
 });

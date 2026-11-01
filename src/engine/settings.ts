@@ -18,6 +18,48 @@ export interface PageSettings {
   wordSpacing: number;
 }
 
+/** Paper drawn under the text (and printed if wanted). */
+export type PaperKind = "blank" | "lined" | "grid4" | "grid5" | "dots";
+
+export interface PaperSettings {
+  kind: PaperKind;
+  /** Distance between ruled lines (lined paper), in millimetres. */
+  lineSpacingMm: number;
+  /** Red margin line on the left. */
+  marginLine: boolean;
+  color: "white" | "cream";
+  /** Print the lines too; off = they are only a guide on screen (writing on a real notebook). */
+  print: boolean;
+}
+
+export const DEFAULT_PAPER: PaperSettings = {
+  kind: "blank",
+  lineSpacingMm: 8,
+  marginLine: false,
+  color: "white",
+  print: true,
+};
+
+/** Distance between the lines the text sits on, or null for blank paper. */
+export function paperRuling(paper: PaperSettings): number | null {
+  switch (paper.kind) {
+    case "lined":
+      return Math.max(3, paper.lineSpacingMm);
+    case "grid4":
+      return 4;
+    case "grid5":
+    case "dots":
+      return 5;
+    default:
+      return null;
+  }
+}
+
+/** Where the first ruled line is, from the top of the page (lined paper leaves a header). */
+export function paperFirstLine(paper: PaperSettings): number {
+  return paper.kind === "lined" ? 20 : 0;
+}
+
 export const A4: PageSettings = {
   widthMm: 210,
   heightMm: 297,
