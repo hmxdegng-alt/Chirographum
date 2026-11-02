@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { pressureFromVelocity, resample, simplify, smoothStroke, type StrokePoint } from "../src/engine/geometry";
 import {
+  AUTO_HYPHEN,
   charactersNeeded,
   createHand,
   HandFormatError,
@@ -48,6 +49,7 @@ import {
   updateParagraphs,
 } from "../src/engine/rich-text";
 import { createRng, deriveSeed } from "../src/engine/random";
+import { hyphenationPoints, syllabify } from "../src/engine/hyphenate";
 import { scribbleStrokes } from "../src/engine/scribble";
 import { highlightPasses } from "../src/engine/render";
 import { sliderZone } from "../src/ui/dom";
@@ -180,7 +182,7 @@ describe("layout", () => {
   });
 
   it("with no imperfections, letters sit exactly on straight lines", () => {
-    const none = { ...nat, sizeVariation: 0, rotation: 0, slantDegrees: 0, slantVariation: 0, baselineWobble: 0, lineDrift: 0, spacingVariation: 0, edgeShrink: 0, marginDrift: 0, lineSlope: 0 };
+    const none = { ...nat, sizeVariation: 0, rotation: 0, slantDegrees: 0, slantVariation: 0, baselineWobble: 0, lineDrift: 0, spacingVariation: 0, edgeShrink: 0, marginDrift: 0, lineSlope: 0, blockTilt: 0 };
     const result = layoutText("uno dos tres", hand, A4, none, 5);
     const ys = new Set(result.glyphs.map((g) => g.yMm.toFixed(6)));
     expect(ys.size).toBe(1);
@@ -238,8 +240,10 @@ describe("layout", () => {
       const at = 5 + trial;
       const newText = oldText.slice(0, at) + "e" + oldText.slice(at);
       const newIds = updateCharIds(oldText, oldIds, newText, fresh);
-      const before = layoutText(oldText, hand, A4, nat, 3, oldIds).glyphs.map((g) => g.variantIndex);
-      const after = layoutText(newText, hand, A4, nat, 3, newIds).glyphs.map((g) => g.variantIndex);
+      // Hyphens added where a word is split depend on where the lines end, not on the letters.
+      const letters = (r: ReturnType<typeof layoutText>) => r.glyphs.filter((g) => g.char !== AUTO_HYPHEN).map((g) => g.variantIndex);
+      const before = letters(layoutText(oldText, hand, A4, nat, 3, oldIds));
+      const after = letters(layoutText(newText, hand, A4, nat, 3, newIds));
       const glyphsBefore = [...oldText.slice(0, at)].filter((c) => hand.glyphs[c]).length;
       let changed = 0;
       for (let i = glyphsBefore; i < before.length; i++) if (before[i] !== after[i + 1]) changed++;
@@ -474,7 +478,7 @@ describe("formatting", () => {
 
 describe("styled layout", () => {
   const hand = syntheticHand("unodstrecaiflhvzTíu");
-  const nat = { ...presetById("normal").values, marginDrift: 0, lineDrift: 0, lineSlope: 0 };
+  const nat = { ...presetById("normal").values, marginDrift: 0, lineDrift: 0, lineSlope: 0, blockTilt: 0 };
   const center = encodeParagraph({ style: "title", align: "center" });
   const normal = encodeParagraph({ style: "normal", align: "left" });
 
@@ -838,5 +842,192 @@ describe("highlighter size", () => {
     // The passes together cover the letters' height.
     const span = Math.max(...big) - Math.min(...big) + 4.6;
     expect(span).toBeGreaterThan(1.65 * 2.8 * 2.5 - 0.5);
+  });
+});
+
+describe("splitting Spanish words", () => {
+  it("splits between syllables, the way it is taught at school", () => {
+    const cases: [string, string[]][] = [
+      ["parque", ["par", "que"]],
+      ["perro", ["pe", "rro"]],
+      ["calle", ["ca", "lle"]],
+      ["chocolate", ["cho", "co", "la", "te"]],
+      ["instante", ["ins", "tan", "te"]],
+      ["construir", ["cons", "truir"]],
+      ["computadora", ["com", "pu", "ta", "do", "ra"]],
+      ["atleta", ["at", "le", "ta"]],
+      ["guerra", ["gue", "rra"]],
+      ["pingüino", ["pin", "güi", "no"]],
+      ["mayo", ["ma", "yo"]],
+      ["tráfico", ["trá", "fi", "co"]],
+      ["Marta:", ["Mar", "ta:"]],
+    ];
+    for (const [word, parts] of cases) expect(syllabify(word)).toEqual(parts);
+  });
+
+  it("never leaves one letter alone, never splits two vowels, acronyms or numbers", () => {
+    expect(syllabify("ahora")).toEqual(["aho", "ra"]);
+    expect(syllabify("examen")).toEqual(["exa", "men"]);
+    expect(hyphenationPoints("agua")).toEqual([]);
+    expect(hyphenationPoints("leer")).toEqual([]);
+    expect(syllabify("poeta")).toEqual(["poe", "ta"]);
+    expect(hyphenationPoints("ONU")).toEqual([]);
+    expect(hyphenationPoints("NASA")).toEqual([]);
+    expect(hyphenationPoints("abc123")).toEqual([]);
+    expect(hyphenationPoints("sí")).toEqual([]);
+  });
+});
+
+describe("lines as by hand", () => {
+  const letters = "abcdefghijklmnopqrstuvwxyzáéíóú";
+  const hand = syntheticHand(letters);
+  const calm = {
+    ...presetById("normal").values,
+    sizeVariation: 0,
+    rotation: 0,
+    slantVariation: 0,
+    baselineWobble: 0,
+    lineDrift: 0,
+    lineSlope: 0,
+    spacingVariation: 0,
+    edgeShrink: 0,
+    marginDrift: 0.35,
+    wordSqueeze: 0,
+    hyphenation: 0,
+    blockTilt: 0,
+  };
+  const paragraph = "la casa del parque tiene una puerta verde y un jardin con flores ".repeat(4).trim();
+  const firstX = (r: ReturnType<typeof layoutText>, from: number) => r.glyphs.find((g) => g.index >= from)!.xMm;
+
+  it("indents every paragraph a little differently, but not the first one nor after a title", () => {
+    const text = `Querida Marta\n${paragraph}\n${paragraph}\n${paragraph}`;
+    const page = { ...A4, paragraphIndentMm: 10 };
+    const r = layoutText(text, hand, page, calm, 4);
+    const paragraphs = text.split("\n");
+    const starts = paragraphs.map((_, i) => paragraphs.slice(0, i).reduce((sum, p) => sum + p.length + 1, 0));
+    const xs = starts.map((s) => firstX(r, s));
+    expect(Math.abs(xs[0] - A4.marginLeftMm)).toBeLessThan(5);
+    for (const x of xs.slice(1)) expect(x - A4.marginLeftMm).toBeGreaterThan(5);
+    expect(new Set(xs.slice(1).map((x) => x.toFixed(2))).size).toBe(3);
+    // The second line of a paragraph goes back to the margin.
+    const second = r.glyphs.find((g) => g.index > starts[1] && r.carets[g.index].line === r.carets[starts[1]].line + 1)!;
+    expect(Math.abs(second.xMm - A4.marginLeftMm)).toBeLessThan(5);
+    // After a title, no indent.
+    const title = encodeFormat({ style: "title", align: "left" });
+    const normal = encodeFormat({ style: "normal", align: "left" });
+    const t = layoutText(`Titulo\n${paragraph}`, hand, page, calm, 4, undefined, { paragraphs: [title, normal] });
+    expect(Math.abs(firstX(t, 7) - A4.marginLeftMm)).toBeLessThan(5);
+    // Nothing set: no indent.
+    expect(Math.abs(firstX(layoutText(text, hand, A4, calm, 4), starts[1]) - A4.marginLeftMm)).toBeLessThan(5);
+  });
+
+  it("a Tab or spaces at the start of a paragraph indent it; at the start of a wrapped line they do not", () => {
+    const tab = layoutText(`hola\n\tcasa`, hand, A4, calm, 2);
+    expect(firstX(tab, 6) - A4.marginLeftMm).toBeGreaterThan(6);
+    const spaces = layoutText(`hola\n   casa`, hand, A4, calm, 2);
+    expect(firstX(spaces, 6) - A4.marginLeftMm).toBeGreaterThan(4);
+    // A tab replaces the automatic indent, it does not add to it.
+    const both = layoutText(`hola\n\tcasa`, hand, { ...A4, paragraphIndentMm: 10 }, calm, 2);
+    expect(firstX(both, 6) - A4.marginLeftMm).toBeLessThan(16);
+  });
+
+  it("a word that does not fit can be crammed in: narrower letters, ending near the margin", () => {
+    const squeeze = { ...calm, wordSqueeze: 1 };
+    const right = A4.widthMm - A4.marginRightMm;
+    let crammed = 0;
+    for (let seed = 1; seed <= 6; seed++) {
+      const r = layoutText(paragraph, hand, A4, squeeze, seed);
+      const narrow = r.glyphs.filter((g) => (g.narrow ?? 1) < 1);
+      crammed += narrow.length;
+      for (const g of narrow) expect(g.xMm + g.widthMm).toBeLessThan(right + 2.5);
+      // The squeeze grows towards the end of the word: its last letter is the narrowest.
+      if (narrow.length > 1) expect(narrow[narrow.length - 1].narrow!).toBeLessThanOrEqual(narrow[0].narrow!);
+    }
+    expect(crammed).toBeGreaterThan(0);
+    expect(layoutText(paragraph, hand, A4, calm, 1).glyphs.some((g) => g.narrow !== undefined)).toBe(false);
+  });
+
+  it("or split by syllables with a hyphen at the end of the line, the rest on the next one", () => {
+    const split = { ...calm, hyphenation: 1 };
+    const long = "documentacion queso extraordinariamente hasta complicada casa ".repeat(10).trim();
+    let hyphens = 0;
+    for (let seed = 1; seed <= 4; seed++) {
+      const r = layoutText(long, hand, A4, split, seed);
+      for (const h of r.glyphs.filter((g) => g.char === AUTO_HYPHEN)) {
+        hyphens++;
+        // The hyphen is the last thing on its line…
+        const line = r.carets[h.index].line;
+        const sameLine = r.glyphs.filter((g) => g.char !== AUTO_HYPHEN && r.carets[g.index].line === line);
+        expect(Math.max(...sameLine.map((g) => g.xMm))).toBeLessThan(h.xMm);
+        // …and the word goes on at the start of the next line, at a syllable boundary.
+        const next = h.index + 1;
+        expect(/\S/.test(long[next])).toBe(true);
+        expect(r.carets[next].line).toBe(line + 1);
+        let start = h.index;
+        while (start > 0 && long[start - 1] !== " ") start--;
+        let end = next;
+        while (end < long.length && long[end] !== " ") end++;
+        expect(hyphenationPoints(long.slice(start, end))).toContain(next - start);
+        // Short words are never split.
+        expect(end - start).toBeGreaterThanOrEqual(6);
+      }
+    }
+    expect(hyphens).toBeGreaterThan(0);
+    expect(layoutText(long, hand, A4, calm, 1).glyphs.some((g) => g.char === AUTO_HYPHEN)).toBe(false);
+  });
+
+  it("a crooked block: lines tilt together and the margin follows them, except on ruled paper", () => {
+    const tilted = { ...calm, marginDrift: 0, blockTilt: 1 };
+    const text = Array.from({ length: 12 }, () => "una linea corta").join("\n");
+    const r = layoutText(text, hand, A4, tilted, 9);
+    const lineStarts = text.split("\n").map((_, i) => r.glyphs.find((g) => r.carets[g.index].line === i)!);
+    const dx = lineStarts[lineStarts.length - 1].xMm - lineStarts[0].xMm;
+    const dy = lineStarts[lineStarts.length - 1].yMm - lineStarts[0].yMm;
+    // The margin drifts sideways as the lines go down, by the same angle the lines rise or fall.
+    expect(Math.abs(dx)).toBeGreaterThan(0.5);
+    const first = r.glyphs.filter((g) => r.carets[g.index].line === 0);
+    const rise = (first[0].yMm - first[first.length - 1].yMm) / (first[first.length - 1].xMm - first[0].xMm);
+    expect(Math.sign(rise)).toBe(Math.sign(dx));
+    expect(Math.abs(Math.atan(dx / dy) - Math.atan(rise))).toBeLessThan(0.002);
+    expect(Math.abs(Math.atan(rise))).toBeLessThanOrEqual(2.01 * (Math.PI / 180));
+    // On ruled paper the writer follows the lines.
+    const lined = layoutText(text, hand, A4, tilted, 9, undefined, { paper: { kind: "lined", lineSpacingMm: 8, marginLine: false, print: true } });
+    const flat = lined.glyphs.filter((g) => lined.carets[g.index].line === 0);
+    expect(flat[0].yMm).toBeCloseTo(flat[flat.length - 1].yMm, 6);
+  });
+});
+
+describe("Chirographum documents folder", () => {
+  const folder = require("../electron/documents-folder.cjs") as {
+    safeFileBase: (name: string) => string;
+    candidateName: (base: string, ext: string, n: number) => string;
+    writeNewFile: (folder: string, base: string, ext: string, data: string) => Promise<string>;
+    ensureFolder: (documents: string) => Promise<string | null>;
+  };
+
+  it("names a new document after its first words, as Windows allows", () => {
+    expect(folder.safeFileBase("Querida Marta")).toBe("Querida Marta");
+    expect(folder.safeFileBase('a/b\\c:d*e?f"g<h>i|j')).toBe("abcdefghij");
+    expect(folder.safeFileBase("Hola...  ")).toBe("Hola");
+    expect(folder.safeFileBase("   ")).toBe("Sin título");
+    expect(folder.candidateName("Carta", "chiro", 1)).toBe("Carta.chiro");
+    expect(folder.candidateName("Carta", "chiro", 3)).toBe("Carta (3).chiro");
+    // Windows refuses "con.chiro": straight to "Con (2)".
+    expect(folder.candidateName("Con", "chiro", 1)).toBe("Con (2).chiro");
+  });
+
+  it("creates the folder and never replaces a document already there", async () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const os = require("node:os") as typeof import("node:os");
+    const path = require("node:path") as typeof import("node:path");
+    const documents = fs.mkdtempSync(path.join(os.tmpdir(), "chiro-docs-"));
+    const target = await folder.ensureFolder(documents);
+    expect(target).toBe(path.join(documents, "Chirographum documents"));
+    const a = await folder.writeNewFile(target!, "Carta", "chiro", "uno");
+    const b = await folder.writeNewFile(target!, "Carta", "chiro", "dos");
+    expect(path.basename(a)).toBe("Carta.chiro");
+    expect(path.basename(b)).toBe("Carta (2).chiro");
+    expect(fs.readFileSync(a, "utf8")).toBe("uno");
+    fs.rmSync(documents, { recursive: true, force: true });
   });
 });

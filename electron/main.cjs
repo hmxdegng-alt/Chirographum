@@ -4,6 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const { app, BrowserWindow, Menu, dialog, ipcMain, session } = require("electron");
 const { applyOfflineSwitches, installNetworkGuard, lockNavigation } = require("./network-guard.cjs");
+const { candidateName, ensureFolder, safeFileBase, writeNewFile } = require("./documents-folder.cjs");
 
 applyOfflineSwitches(app.commandLine);
 
@@ -12,6 +13,7 @@ const HAND_EXTENSION = "chmano";
 const DOCUMENT_EXTENSION = "chiro";
 const DOCUMENT_FILTER = { name: "Documento de Chirographum", extensions: [DOCUMENT_EXTENSION] };
 
+
 // Test hooks, only honoured when running from source (never in the installed app).
 const TEST_USER_DATA = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_USER_DATA;
 const TEST_PDF_PATH = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_PDF_PATH;
@@ -19,7 +21,9 @@ const TEST_PDF_PATH = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST
 const TEST_SAVE_PATH = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_SAVE_PATH;
 const TEST_OPEN_PATH = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_OPEN_PATH;
 const TEST_UNSAVED_CHOICE = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_UNSAVED_CHOICE;
+const TEST_DOCUMENTS = app.isPackaged ? undefined : process.env.CHIROGRAPHUM_TEST_DOCUMENTS;
 if (TEST_USER_DATA) app.setPath("userData", TEST_USER_DATA);
+if (TEST_DOCUMENTS) app.setPath("documents", TEST_DOCUMENTS);
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -51,6 +55,11 @@ async function askUnsavedChanges(name) {
 
 function autosavePath() {
   return path.join(app.getPath("userData"), "hands", `autosave.${HAND_EXTENSION}`);
+}
+
+/** "Chirographum documents" in the user's Documents, created if missing; null if that is not possible. */
+function ensureDocumentsFolder() {
+  return ensureFolder(app.getPath("documents"));
 }
 
 function createWindow() {
@@ -242,26 +251,41 @@ function registerIpc() {
 
   ipcMain.handle("doc:askUnsaved", (_event, name) => askUnsavedChanges(String(name)));
 
-  ipcMain.handle("doc:save", async (_event, json, filePath, suggestedName) => {
-    let target = typeof filePath === "string" && filePath ? filePath : null;
-    if (!target && TEST_SAVE_PATH) target = TEST_SAVE_PATH;
+  // Saving: a document that has a file goes back to it; a new one goes straight into
+  // "Chirographum documents" (Ctrl+S); "Guardar como" asks, always suggesting that folder.
+  ipcMain.handle("doc:save", async (_event, json, filePath, suggestedName, ask) => {
+    const data = String(json);
+    const base = safeFileBase(suggestedName);
+    const existing = typeof filePath === "string" && filePath ? filePath : null;
+    if (existing && !ask) {
+      await fs.writeFile(existing, data, "utf8");
+      return { path: existing, direct: false };
+    }
+    const folder = await ensureDocumentsFolder();
+    if (!ask && folder) {
+      return { path: await writeNewFile(folder, base, DOCUMENT_EXTENSION, data), direct: true };
+    }
+    let target = TEST_SAVE_PATH || null;
     if (!target) {
+      const fileName = candidateName(base, DOCUMENT_EXTENSION, 1);
       const result = await dialog.showSaveDialog(mainWindow, {
         title: "Guardar documento",
-        defaultPath: `${suggestedName || "Sin título"}.${DOCUMENT_EXTENSION}`,
+        defaultPath: folder ? path.join(folder, fileName) : fileName,
         filters: [DOCUMENT_FILTER],
       });
       if (result.canceled || !result.filePath) return null;
       target = result.filePath;
     }
-    await fs.writeFile(target, String(json), "utf8");
-    return target;
+    await fs.writeFile(target, data, "utf8");
+    return { path: target, direct: false };
   });
 
   ipcMain.handle("doc:open", async () => {
     if (TEST_OPEN_PATH) return { path: TEST_OPEN_PATH, text: await fs.readFile(TEST_OPEN_PATH, "utf8") };
+    const folder = await ensureDocumentsFolder();
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Abrir documento",
+      ...(folder ? { defaultPath: folder } : {}),
       properties: ["openFile"],
       filters: [DOCUMENT_FILTER],
     });
@@ -385,6 +409,7 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
   installNetworkGuard(session.defaultSession, DEV_SERVER_URL);
+  void ensureDocumentsFolder();
   buildMenu();
   registerIpc();
   createWindow();

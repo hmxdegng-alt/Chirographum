@@ -151,6 +151,8 @@ const USUAL: Record<string, UsualRange> = {
   handSmudges: { usual: [0, 0.6], caution: 0.25 },
   fatigue: { usual: [0, 1], caution: 0.3 },
   inkBlobs: { usual: [0, 0.6], caution: 0.3 },
+  blockTilt: { usual: [0, 0.75], caution: 0.25 },
+  paragraphIndentMm: { usual: [0, 20], caution: 5 },
   naturalnessAmount: { usual: [0.4, 1.5], caution: 0.3 },
   paperSpacing: { usual: [6, 10], caution: 0.8 },
 };
@@ -167,7 +169,10 @@ const NATURAL_KEYS: (keyof Naturalness)[] = [
   "lineSlope",
   "spacingVariation",
   "edgeShrink",
+  "wordSqueeze",
+  "hyphenation",
   "marginDrift",
+  "blockTilt",
   "inkTexture",
   "inkSkips",
   "highlighterSmear",
@@ -1175,6 +1180,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       pageSlider(es.sheet.lineSpacing, "lineSpacingMm", 3, 40, 0.5),
       pageSlider(es.sheet.letterSpacing, "letterSpacing", -0.3, 2, 0.01, spacingFormat),
       pageSlider(es.sheet.wordSpacing, "wordSpacing", 0.2, 6, 0.05, spacingFormat),
+      pageSlider(es.sheet.paragraphIndent, "paragraphIndentMm", 0, 40, 0.5, mmFormat, es.sheet.paragraphIndentHelp),
+      h("p", { class: "muted section-help", "data-search": searchKey(`${es.sheet.paragraphIndent} ${es.sheet.paragraphIndentHelp}`) }, es.sheet.paragraphIndentHelp),
       h("p", { class: "field-label", "data-search": searchKey([es.sheet.margins, es.sheet.marginLeft, es.sheet.marginRight, es.sheet.marginTop, es.sheet.marginBottom].join(" ")) }, es.sheet.margins),
       pageSlider(es.sheet.marginLeft, "marginLeftMm", 0, 100, 1, mmFormat, es.sheet.margins),
       pageSlider(es.sheet.marginRight, "marginRightMm", 0, 100, 1, mmFormat, es.sheet.margins),
@@ -1280,7 +1287,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     ];
     for (const g of result.glyphs) {
       if (g.page !== pageIndex) continue;
-      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0, g.style);
+      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), (g.narrow ?? 1).toFixed(3), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0, g.style);
     }
     for (const d of result.decorations) {
       if (d.page !== pageIndex) continue;

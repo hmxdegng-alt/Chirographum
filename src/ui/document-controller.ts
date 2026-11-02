@@ -54,17 +54,20 @@ export function createDocumentController(sheet: SheetDocumentApi, store: Store, 
     store.update({ tab: "sheet" });
   }
 
-  /** Saves; asks for a name if the document has none (or always with saveAs). */
+  /**
+   * Saves. A new document goes straight into "Chirographum documents"; saveAs always
+   * asks, suggesting that folder.
+   */
   async function save(asNew: boolean): Promise<boolean> {
     const doc = sheet.getDocument();
     const json = serializeDocument(doc);
-    const target = await bridge.saveDocument(json, asNew ? null : filePath, asNew && filePath ? name() : suggestedName(doc.text));
-    if (!target) return false;
-    filePath = target;
+    const saved = await bridge.saveDocument(json, filePath, asNew && filePath ? name() : suggestedName(doc.text), asNew);
+    if (!saved) return false;
+    filePath = saved.path;
     savedSnapshot = json;
     dirty = false;
     update();
-    toast(es.document.savedAs(name()));
+    toast(saved.direct ? es.document.savedInFolder(name()) : es.document.savedAs(name()));
     return true;
   }
 

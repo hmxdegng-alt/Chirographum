@@ -12,8 +12,12 @@ interface DesktopBridge {
   exportPdf(): Promise<string | null>;
   setViewOption(name: string, value: boolean): void;
   onViewOption(callback: (name: string, value: boolean) => void): void;
-  /** Writes a document; asks for a name when filePath is null. Returns the path, or null if cancelled. */
-  saveDocument(json: string, filePath: string | null, suggestedName: string): Promise<string | null>;
+  /**
+   * Writes a document. With a file path and `ask` false it goes back to that file; without
+   * one it goes straight into "Chirographum documents" (`direct`); `ask` shows the save
+   * dialog in that folder. Null if the person cancelled.
+   */
+  saveDocument(json: string, filePath: string | null, suggestedName: string, ask: boolean): Promise<{ path: string; direct: boolean } | null>;
   openDocument(): Promise<{ path: string; text: string } | null>;
   takePendingDocument(): Promise<{ path: string; text: string } | null>;
   askUnsavedChanges(name: string): Promise<"save" | "discard" | "cancel">;
@@ -67,7 +71,7 @@ export const bridge: DesktopBridge = window.chirographum ?? {
     link.download = `${suggestedName}.chiro`;
     link.click();
     URL.revokeObjectURL(link.href);
-    return link.download;
+    return { path: link.download, direct: false };
   },
   async openDocument() {
     return new Promise((resolve) => {

@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld("chirographum", {
   printPage: (dpi) => ipcRenderer.invoke("page:print", Number(dpi) || 0),
   exportPdf: () => ipcRenderer.invoke("page:exportPdf"),
   // Documents (.chiro).
-  saveDocument: (json, filePath, suggestedName) => ipcRenderer.invoke("doc:save", json, filePath, suggestedName),
+  saveDocument: (json, filePath, suggestedName, ask) => ipcRenderer.invoke("doc:save", json, filePath, suggestedName, Boolean(ask)),
   openDocument: () => ipcRenderer.invoke("doc:open"),
   takePendingDocument: () => ipcRenderer.invoke("doc:takePending"),
   askUnsavedChanges: (name) => ipcRenderer.invoke("doc:askUnsaved", name),

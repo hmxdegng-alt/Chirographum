@@ -16,6 +16,12 @@ export interface PageSettings {
   letterSpacing: number;
   /** Width of a space, in x-height units. */
   wordSpacing: number;
+  /**
+   * Indent at the start of every paragraph, as people do in letters, in
+   * millimetres (0 = none). A Tab typed at the start of a paragraph indents
+   * too. Each paragraph's indent is a little different, as by hand.
+   */
+  paragraphIndentMm: number;
 }
 
 /** Paper drawn under the text (and printed if wanted). */
@@ -70,6 +76,7 @@ export const A4: PageSettings = {
   lineSpacingMm: 9.5,
   letterSpacing: 0.14,
   wordSpacing: 1.2,
+  paragraphIndentMm: 0,
 };
 
 /** Every value goes from 0 (none) to 1 (a lot), except slantDegrees. */
@@ -101,6 +108,12 @@ export interface Naturalness {
   fatigue: number;
   /** Lumps of ink the tip leaves now and then, mostly ballpoints (0–1). */
   inkBlobs: number;
+  /** A word that does not quite fit is crammed in: smaller and tighter towards its end (0–1). */
+  wordSqueeze: number;
+  /** A long word that does not fit is split with a hyphen, by syllables (0–1). */
+  hyphenation: number;
+  /** The whole block of text sits a little crooked on the page, as on a sheet turned under the hand (0–1; 1 ≈ 2°). */
+  blockTilt: number;
 }
 
 export interface Preset {
@@ -133,6 +146,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0,
       fatigue: 0,
       inkBlobs: 0,
+      wordSqueeze: 0,
+      hyphenation: 0.2,
+      blockTilt: 0,
     },
   },
   {
@@ -155,6 +171,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0,
       fatigue: 0,
       inkBlobs: 0.1,
+      wordSqueeze: 0.15,
+      hyphenation: 0.1,
+      blockTilt: 0.05,
     },
   },
   {
@@ -177,6 +196,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.05,
       fatigue: 0,
       inkBlobs: 0.25,
+      wordSqueeze: 0.4,
+      hyphenation: 0.12,
+      blockTilt: 0.2,
     },
   },
   {
@@ -200,6 +222,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.15,
       fatigue: 0.25,
       inkBlobs: 0.35,
+      wordSqueeze: 0.85,
+      hyphenation: 0.3,
+      blockTilt: 0.5,
     },
   },
   {
@@ -222,6 +247,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.15,
       fatigue: 0.2,
       inkBlobs: 0.4,
+      wordSqueeze: 0.7,
+      hyphenation: 0.15,
+      blockTilt: 0.4,
     },
   },
   {
@@ -245,6 +273,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.1,
       fatigue: 0.9,
       inkBlobs: 0.3,
+      wordSqueeze: 0.5,
+      hyphenation: 0.1,
+      blockTilt: 0.35,
     },
   },
   {
@@ -268,6 +299,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.35,
       fatigue: 0.15,
       inkBlobs: 0.2,
+      wordSqueeze: 0.9,
+      hyphenation: 0.05,
+      blockTilt: 0.7,
     },
   },
   {
@@ -291,6 +325,9 @@ export const PRESETS: Preset[] = [
       handSmudges: 0.2,
       fatigue: 0.4,
       inkBlobs: 0.4,
+      wordSqueeze: 1.0,
+      hyphenation: 0.1,
+      blockTilt: 0.6,
     },
   },
 ];

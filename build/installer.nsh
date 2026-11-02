@@ -1,4 +1,5 @@
-﻿; Chirographum: the first page of the uninstaller has a checkbox to also
+﻿; Chirographum: the installer creates "Chirographum documents" in Documents,
+; and the first page of the uninstaller has a checkbox to also
 ; delete the user's letters, texts and settings (%APPDATA%\Chirographum).
 ; Unticked by default. Updates uninstall the old version silently: they
 ; never show the page and never delete anything.
@@ -20,9 +21,9 @@
     ${If} $0 == error
       Abort
     ${EndIf}
-    ${NSD_CreateLabel} 0 0 100% 40u "Tus letras, tus textos y tus ajustes se guardan aparte, en tu carpeta de usuario. Si no marcas la casilla, se quedan en el ordenador y los recuperarás al volver a instalar Chirographum."
+    ${NSD_CreateLabel} 0 0 100% 56u "Tus letras, tus textos y tus ajustes se guardan aparte, en tu carpeta de usuario. Si no marcas la casilla, se quedan en el ordenador y los recuperarás al volver a instalar Chirographum.$\r$\n$\r$\nLos documentos de la carpeta «Chirographum documents» no se borran nunca."
     Pop $0
-    ${NSD_CreateCheckbox} 0 50u 100% 12u "Borrar también mis letras, mis textos y mis ajustes"
+    ${NSD_CreateCheckbox} 0 64u 100% 12u "Borrar también mis letras, mis textos y mis ajustes"
     Pop $chirographumCheckbox
     ${If} $chirographumDeleteData == ${BST_CHECKED}
       ${NSD_Check} $chirographumCheckbox
@@ -36,6 +37,19 @@
   Function un.chirographumDataPageLeave
     ${NSD_GetState} $chirographumCheckbox $chirographumDeleteData
   FunctionEnd
+!macroend
+
+; The folder where Ctrl+S saves new documents, in the user's own Documents
+; (also when installing for all users). The app creates it again if it is
+; missing. The uninstaller never deletes it: those are the user's documents.
+!macro customInstall
+  ${if} $installMode == "all"
+    SetShellVarContext current
+  ${endif}
+  CreateDirectory "$DOCUMENTS\Chirographum documents"
+  ${if} $installMode == "all"
+    SetShellVarContext all
+  ${endif}
 !macroend
 
 !macro customUnInstall

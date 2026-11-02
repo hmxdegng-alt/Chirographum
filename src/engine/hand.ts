@@ -151,3 +151,33 @@ export function missingCharacters(hand: Hand, text: string): string[] {
 export function variantBounds(variant: GlyphVariant): Bounds {
   return boundsOf(variant.strokes) ?? { minX: 0, maxX: 0.3, minY: 0, maxY: 0.3 };
 }
+
+/**
+ * The hyphen added when a word is split at the end of a line. The hand's own
+ * "-" is used when it has one; otherwise this character stands for a short
+ * stroke drawn like a quick hand-made dash (it never comes from typed text).
+ */
+export const AUTO_HYPHEN = "‐";
+
+const dash = (x0: number, y0: number, x1: number, y1: number, sag: number): GlyphVariant => ({
+  strokes: [
+    Array.from({ length: 7 }, (_, i) => {
+      const t = i / 6;
+      return {
+        x: x0 + (x1 - x0) * t,
+        y: y0 + (y1 - y0) * t - sag * Math.sin(Math.PI * t),
+        // Firm at the start, lighter as the pen lifts.
+        p: 0.95 - 0.12 * t,
+        t: Math.round(t * 120),
+      };
+    }),
+  ],
+});
+
+const FALLBACK_HYPHEN: GlyphVariant[] = [dash(0.12, 0.47, 0.66, 0.52, 0.015), dash(0.1, 0.5, 0.6, 0.53, -0.01), dash(0.14, 0.44, 0.7, 0.51, 0.02)];
+
+/** The drawings for a character, including the automatic hyphen when the hand has no "-". */
+export function variantsOf(hand: Hand, char: string): GlyphVariant[] {
+  if (char === AUTO_HYPHEN) return hand.glyphs["-"]?.length ? hand.glyphs["-"] : FALLBACK_HYPHEN;
+  return hand.glyphs[char] ?? [];
+}

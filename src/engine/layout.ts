@@ -4,7 +4,8 @@
 // It also reports where the text cursor goes for every character, so the
 // user can write directly on the page.
 
-import { variantBounds, type Hand } from "./hand";
+import { AUTO_HYPHEN, variantBounds, variantsOf, type Hand } from "./hand";
+import { hyphenationPoints } from "./hyphenate";
 import { clampedGauss, createRng, deriveSeed, hashString } from "./random";
 import {
   BOLD,
@@ -55,6 +56,8 @@ export interface PlacedGlyph {
   style: number;
   /** Rubbed out with an eraser: only a faint trace is left. */
   erased?: boolean;
+  /** Squeezed sideways (a word crammed in at the end of a line); 1 or absent = as drawn. */
+  narrow?: number;
 }
 
 /**
@@ -177,6 +180,12 @@ type Token =
 
 const DEG = Math.PI / 180;
 const EDGE_ZONE_MM = 35;
+/** A Tab at the start of a paragraph, when no paragraph indent is set, in millimetres. */
+const TAB_INDENT_MM = 10;
+/** Words shorter than this are never split at the end of a line. */
+const MIN_SPLIT_LETTERS = 6;
+/** The most a crooked block of text turns (at 100 %), in degrees. */
+const BLOCK_TILT_DEG = 2;
 const MISSING_GAP = 0.6;
 export const MAX_PAGES = 200;
 /** Two drawings of the same letter closer than this (in characters) must differ. */
@@ -312,6 +321,13 @@ interface LineState {
   wobblePhase: number;
   /** A justified line never ends exactly at the margin: how far off it ends, in millimetres. */
   edgeJitter: number;
+  /** Where this line's margins are: the page's, moved sideways when the block is crooked. */
+  left: number;
+  right: number;
+  /** First line of its paragraph: spaces and tabs typed here move the pen (a hand-made indent). */
+  paragraphStart: boolean;
+  /** The automatic indent this line starts with, in millimetres (0 = none). */
+  autoIndent: number;
 }
 
 /** Text with Windows or old Mac line endings normalised; the editor and the layout use the same string. */
@@ -386,7 +402,23 @@ export function layoutText(
     const down = Math.max(0, Math.min(1, (baselineMm - firstBaselineMm) / Math.max(1, bottomMm - firstBaselineMm)));
     return 1 + (nat.fatigue ?? 0) * Math.min(2.5, 0.8 * (pageIndex + down));
   };
-  const makeLine = (index: number, pageIndex: number, baselineMm: number, key: number | string, paragraph: number): LineState => {
+  // A crooked block: the sheet sits turned a little under the hand, a different
+  // amount on every page, usually the same way. Lines on ruled paper follow the rules.
+  const pivotY = (page.marginTopMm + bottomMm) / 2;
+  const tiltHabit = createRng(deriveSeed(seed, "block-tilt")).next() < 0.5 ? -1 : 1;
+  const tiltOf = (pageIndex: number): number => {
+    if (ruling || !((nat.blockTilt ?? 0) > 0)) return 0;
+    const rng = createRng(deriveSeed(seed, "block-tilt", pageIndex));
+    const sign = rng.next() < 0.8 ? tiltHabit : -tiltHabit;
+    return Math.tan(sign * (nat.blockTilt ?? 0) * BLOCK_TILT_DEG * (0.35 + 0.65 * rng.next()) * DEG);
+  };
+  /** An indent made by hand: never quite the same twice. */
+  const handIndent = (baseMm: number, key: number | string): number => {
+    const rng = createRng(deriveSeed(seed, "indent", key));
+    const drift = nat.marginDrift;
+    return Math.max(0, baseMm * (1 + clampedGauss(rng) * 0.3 * drift) + clampedGauss(rng) * 0.8 * drift);
+  };
+  const makeLine = (index: number, pageIndex: number, baselineMm: number, key: number | string, paragraph: number, paragraphStart = false): LineState => {
     const rng = createRng(deriveSeed(seed, "line", key));
     const tired = tiredAt(pageIndex, baselineMm);
     const limit = marginLimit * Math.min(1.6, tired);
@@ -396,6 +428,12 @@ export function layoutText(
     const drift = Math.max(-most, Math.min(most, previousDrift * 0.6 + Math.tan(clampedGauss(rng) * 0.55 * DEG * nat.lineDrift * tired)));
     previousDrift = drift;
     const format = paragraphOf(paragraph);
+    const tilt = tiltOf(pageIndex);
+    const shift = (baselineMm - pivotY) * tilt;
+    // Letters indent their paragraphs, but not the first one nor the one after a heading.
+    const indentable =
+      paragraphStart && paragraph > 0 && format.style === "normal" && paragraphOf(paragraph - 1).style === "normal" && (format.align === "left" || format.align === "justify");
+    const autoIndent = indentable && (page.paragraphIndentMm ?? 0) > 0 ? handIndent(page.paragraphIndentMm, key) : 0;
     return {
       index,
       page: pageIndex,
@@ -407,12 +445,16 @@ export function layoutText(
       stops: [],
       baselineMm,
       tired,
-      startXMm: page.marginLeftMm + marginWalk,
-      slope: tendency + drift,
+      startXMm: page.marginLeftMm + marginWalk + shift + autoIndent,
+      slope: tendency + drift + tilt,
       wobbleAmpMm: nat.lineDrift * 0.3 * rng.next() * tired,
       wobblePeriodMm: 60 + rng.next() * 80,
       wobblePhase: rng.next() * Math.PI * 2,
       edgeJitter: (rng.next() - 0.5) * 1.6,
+      left: page.marginLeftMm + shift,
+      right: rightMm + shift,
+      paragraphStart,
+      autoIndent,
     };
   };
 
@@ -421,8 +463,8 @@ export function layoutText(
     return line.baselineMm - line.slope * dx + line.wobbleAmpMm * Math.sin((2 * Math.PI * dx) / line.wobblePeriodMm + line.wobblePhase);
   };
 
-  const shrinkAt = (xMm: number): number => {
-    const into = (xMm - (rightMm - EDGE_ZONE_MM)) / EDGE_ZONE_MM;
+  const shrinkAt = (xMm: number, line: LineState): number => {
+    const into = (xMm - (line.right - EDGE_ZONE_MM)) / EDGE_ZONE_MM;
     return Math.max(0.3, 1 - nat.edgeShrink * 0.22 * Math.max(0, Math.min(1.3, into)));
   };
 
@@ -430,9 +472,12 @@ export function layoutText(
    * Places a word starting at startX; returns the glyphs, where each character
    * starts, where the pen goes on from and how far the ink reaches. Letters
    * written over or rubbed out send the pen back to where they began, so what
-   * follows is written on top of them.
+   * follows is written on top of them. `squeeze` (0–1) crams the word in: from
+   * about a third of the way in, letters get much narrower and closer, a bit
+   * smaller, and the end of the word rises a little (as in the owner's letters).
    */
-  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], indices: number[], startX: number, line: LineState, plain = false) => {
+  const placeWord = (plans: (GlyphPlan | null)[], chars: string[], indices: number[], startX: number, line: LineState, squeeze = 0) => {
+    const count = plans.length;
     const xh = baseXh * line.scale;
     const placed: PlacedGlyph[] = [];
     const gaps: MissingBox[] = [];
@@ -441,7 +486,7 @@ export function layoutText(
     let underFrom: number | null = null;
     let reach = startX;
     plans.forEach((plan, i) => {
-      const under = !plain && isUnder(marks[indices[i]] ?? 0);
+      const under = isUnder(marks[indices[i]] ?? 0);
       if (under && underFrom === null) underFrom = x;
       if (!under && underFrom !== null) {
         reach = Math.max(reach, x);
@@ -455,14 +500,17 @@ export function layoutText(
         return;
       }
       const look = lookOf(plan, line.tired);
-      const scale = look.size * shrinkAt(x) * line.scale;
-      const widthMm = plan.width * baseXh * scale;
+      // The writer sees the edge coming late: the squeeze grows towards the end of the word.
+      const cram = squeeze > 0 ? squeeze * Math.max(0, Math.min(1, (i + 1 - 0.3 * count) / (0.7 * count))) : 0;
+      const scale = look.size * shrinkAt(x, line) * line.scale * (1 - 0.12 * cram);
+      const narrow = 1 - 0.45 * cram;
+      const widthMm = plan.width * baseXh * scale * narrow;
       placed.push({
         char: plan.char,
         variantIndex: plan.variantIndex,
         page: line.page,
         xMm: x,
-        yMm: baselineAt(line, x) - look.lift * xh,
+        yMm: baselineAt(line, x) - look.lift * xh - 0.12 * cram * xh,
         scale,
         rotation: look.rotation,
         shear: look.slant,
@@ -472,9 +520,10 @@ export function layoutText(
         widthMm,
         bold: plan.bold,
         style: plan.style,
-        erased: !plain && correctionOf(marks[plan.index] ?? 0) === "erase",
+        erased: correctionOf(marks[plan.index] ?? 0) === "erase",
+        ...(cram > 0 ? { narrow } : {}),
       });
-      x += widthMm + page.letterSpacing * baseXh * scale * (1 + look.spacing) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
+      x += widthMm + page.letterSpacing * baseXh * scale * (1 + look.spacing) * (1 - 0.8 * cram) + (plan.bold ? BOLD_SPACING * baseXh * scale : 0);
     });
     reach = Math.max(reach, x);
     // Ending on letters to be written over: the next word goes on top of them.
@@ -484,7 +533,7 @@ export function layoutText(
 
   let lineIndex = 0;
   let pageIndex = 0;
-  let line = makeLine(0, 0, firstBaselineMm, "first", 0);
+  let line = makeLine(0, 0, firstBaselineMm, "first", 0, true);
   let cursor = line.startXMm;
   let lineHasWords = false;
 
@@ -521,7 +570,7 @@ export function layoutText(
     });
     if (gaps.length === 0) return;
     gaps.sort((a, b) => a - b);
-    const each = Math.max(-0.5 * word, Math.min(2.5 * word, (rightMm + line.edgeJitter - maxX) / gaps.length));
+    const each = Math.max(-0.5 * word, Math.min(2.5 * word, (line.right + line.edgeJitter - maxX) / gaps.length));
     const shift = (x: number) => {
       let k = 0;
       while (k < gaps.length && gaps[k] < x - 1e-6) k++;
@@ -550,7 +599,7 @@ export function layoutText(
     if (lineGlyphs.length === 0 && lineGaps.length === 0) return;
     const minX = Math.min(...lineGlyphs.map((g) => g.xMm), ...lineGaps.map((g) => g.xMm));
     const maxX = Math.max(...lineGlyphs.map((g) => g.xMm + g.widthMm), ...lineGaps.map((g) => g.xMm + g.widthMm));
-    const target = line.align === "center" ? (page.marginLeftMm + rightMm) / 2 - (minX + maxX) / 2 : rightMm - maxX;
+    const target = line.align === "center" ? (line.left + line.right) / 2 - (minX + maxX) / 2 : line.right - maxX;
     const dy = -line.slope * target;
     for (const g of lineGlyphs) {
       g.xMm += target;
@@ -586,7 +635,7 @@ export function layoutText(
       pageNow = pageIndex;
       baseline = snap(page.marginTopMm + baseXh * nextScale * 2.1);
     }
-    line = makeLine(lineIndex, pageNow, baseline, key, paragraph);
+    line = makeLine(lineIndex, pageNow, baseline, key, paragraph, newParagraph);
     cursor = line.startXMm;
     lineHasWords = false;
     return true;
@@ -656,7 +705,136 @@ export function layoutText(
     });
   };
 
-  outer: for (let t = 0; t < tokens.length; t++) {
+  const fits = (result: ReturnType<typeof placeWord>) => result.reach <= line.right + overflowToleranceMm;
+
+  /** The hyphen after the first part of a split word: in the pen, colour and size of its last letter. */
+  const hyphenPlan = (token: WordToken, k: number): GlyphPlan => {
+    const variants = variantsOf(hand, AUTO_HYPHEN);
+    const last = token.indices[k - 1];
+    const id = ids[last] ?? last;
+    const rng = createRng(deriveSeed(seed, "hyphen", id));
+    const variantIndex = rng.int(variants.length);
+    const bounds = variantBounds(variants[variantIndex]);
+    const mark = marks[last] ?? 0;
+    const style = runStyleIndex(mark);
+    return {
+      char: AUTO_HYPHEN,
+      variantIndex,
+      width: Math.max(0.05, bounds.maxX - bounds.minX),
+      offsetX: -bounds.minX,
+      sizeDev: clampedGauss(rng) * 0.06 * nat.sizeVariation,
+      rotation: clampedGauss(rng) * 3 * DEG * nat.rotation,
+      slantBase: 0,
+      slantDev: 0,
+      lift: clampedGauss(rng) * 0.05 * nat.baselineWobble,
+      spacing: 0,
+      runSize: style > 0 ? runStyles[style - 1]?.size ?? 1 : 1,
+      seed: deriveSeed(seed, "hyphen-ink", id),
+      index: last,
+      bold: Boolean(mark & BOLD),
+      style,
+    };
+  };
+
+  /** Crams the word into what is left of the line, if the writer can; null when it would not fit even so. */
+  const squeezeToFit = (token: WordToken, rng: ReturnType<typeof createRng>) => {
+    if (token.plans.length < 3) return null;
+    const most = Math.min(1, 0.35 + 0.65 * nat.wordSqueeze);
+    // A crammed word often ends a little into the margin.
+    const end = line.right + Math.min(overflowToleranceMm, 0.3 + rng.next() * 1.2);
+    const tryWith = (squeeze: number) => placeWord(token.plans, token.chars, token.indices, cursor, line, squeeze);
+    if (tryWith(most).reach > end) return null;
+    let low = 0;
+    let high = most;
+    for (let k = 0; k < 10; k++) {
+      const mid = (low + high) / 2;
+      if (tryWith(mid).reach > end) low = mid;
+      else high = mid;
+    }
+    // The writer does not know exactly where the edge is: a little more than needed.
+    return tryWith(Math.min(most, high * (1 + 0.2 * rng.next())));
+  };
+
+  /**
+   * Splits the word by syllables with a hyphen, as late as it fits, and writes
+   * the rest on the next line. Null when no split fits; false when the pages run out.
+   */
+  const splitAtEdge = (token: WordToken): boolean | null => {
+    // Short words go to the next line whole: nobody writes "que-so".
+    if (token.chars.some((c) => c.length !== 1) || token.chars.filter((c) => /\p{L}/u.test(c)).length < MIN_SPLIT_LETTERS) return null;
+    const points = hyphenationPoints(token.chars.join(""));
+    for (let p = points.length - 1; p >= 0; p--) {
+      const k = points[p];
+      const first = placeWord([...token.plans.slice(0, k), hyphenPlan(token, k)], [...token.chars.slice(0, k), AUTO_HYPHEN], [...token.indices.slice(0, k), token.indices[k - 1]], cursor, line);
+      if (!fits(first)) continue;
+      glyphs.push(...first.placed);
+      for (const g of first.placed) if (g.char !== AUTO_HYPHEN) glyphByIndex.set(g.index, g);
+      missingBoxes.push(...first.gaps);
+      first.starts.slice(0, k).forEach((x, i) => stopAt(token.indices[i], x));
+      cursor = first.endX;
+      lineHasWords = true;
+      const rest: WordToken = {
+        kind: "word",
+        key: ids[token.indices[k]] ?? token.indices[k],
+        plans: token.plans.slice(k),
+        chars: token.chars.slice(k),
+        indices: token.indices.slice(k),
+        paragraph: token.paragraph,
+      };
+      if (!nextLine(rest.key, token.paragraph, false)) return false;
+      return placeToken(rest);
+    }
+    return null;
+  };
+
+  /**
+   * A word that does not fit at the end of a line: some people cram it in,
+   * some split it with a hyphen, most take it to the next line. Each word has
+   * its own habit (it comes from its identity). Words with corrections are not touched.
+   */
+  const fitAtEdge = (token: WordToken): boolean | null => {
+    if (token.indices.some((i) => correctionOf(marks[i] ?? 0) !== null)) return null;
+    const rng = createRng(deriveSeed(seed, "edge-word", token.key));
+    const crams = rng.next() < Math.min(0.9, (nat.wordSqueeze ?? 0) * 1.2);
+    const splits = rng.next() < Math.min(0.95, nat.hyphenation ?? 0);
+    if (crams) {
+      const squeezed = squeezeToFit(token, rng);
+      if (squeezed) {
+        commit(token, squeezed);
+        writingOver = false;
+        return true;
+      }
+    }
+    return splits ? splitAtEdge(token) : null;
+  };
+
+  /** Places a word where the pen is, on this line or the next; false when the pages run out. */
+  function placeToken(token: WordToken): boolean {
+    let attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
+    if (!fits(attempt) && lineHasWords) {
+      const done = fitAtEdge(token);
+      if (done !== null) return done;
+      if (!nextLine(token.key, token.paragraph, false)) return false;
+      attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
+    }
+    if (!fits(attempt)) {
+      // A single word longer than the whole line: break it wherever it runs out.
+      for (let i = 0; i < token.plans.length; i++) {
+        let piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
+        if (!fits(piece) && lineHasWords) {
+          if (!nextLine(ids[token.indices[i]] ?? token.indices[i], token.paragraph, false)) return false;
+          piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
+        }
+        commit(token, piece, i);
+      }
+      return true;
+    }
+    commit(token, attempt);
+    writingOver = attempt.over;
+    return true;
+  }
+
+  for (let t = 0; t < tokens.length; t++) {
     const token = tokens[t];
     if (token.kind === "break") {
       stopAt(token.index, cursor);
@@ -666,6 +844,21 @@ export function layoutText(
       continue;
     }
     if (token.kind === "space") {
+      if (!lineHasWords && line.paragraphStart && (line.align === "left" || line.align === "justify")) {
+        // Spaces and tabs typed at the start of a paragraph indent it, by hand:
+        // they take the place of the automatic indent.
+        if (line.autoIndent > 0) {
+          cursor -= line.autoIndent;
+          line.autoIndent = 0;
+        }
+        stopAt(token.index, cursor);
+        const rng = createRng(token.seed);
+        cursor +=
+          text[token.index] === "\t"
+            ? handIndent((page.paragraphIndentMm ?? 0) > 0 ? page.paragraphIndentMm : TAB_INDENT_MM, token.seed)
+            : page.wordSpacing * baseXh * line.scale * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
+        continue;
+      }
       stopAt(token.index, cursor);
       if (!lineHasWords || writingOver) {
         writingOver = false;
@@ -692,25 +885,7 @@ export function layoutText(
       continue;
     }
     gapStart = null;
-    let attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
-    if (attempt.reach > rightMm + overflowToleranceMm && lineHasWords) {
-      if (!nextLine(token.key, token.paragraph, false)) break;
-      attempt = placeWord(token.plans, token.chars, token.indices, cursor, line);
-    }
-    if (attempt.reach > rightMm + overflowToleranceMm) {
-      // A single word longer than the whole line: break it wherever it runs out.
-      for (let i = 0; i < token.plans.length; i++) {
-        let piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
-        if (piece.reach > rightMm + overflowToleranceMm && lineHasWords) {
-          if (!nextLine(ids[token.indices[i]] ?? token.indices[i], token.paragraph, false)) break outer;
-          piece = placeWord([token.plans[i]], [token.chars[i]], [token.indices[i]], cursor, line);
-        }
-        commit(token, piece, i);
-      }
-      continue;
-    }
-    commit(token, attempt);
-    writingOver = attempt.over;
+    if (!placeToken(token)) break;
   }
 
   // The end of the text, and anything cut off by the page limit, sits where the pen stopped.
@@ -936,7 +1111,7 @@ function decorate(
 export function glyphPointToPage(glyph: PlacedGlyph, xhMm: number, x: number, y: number): { x: number; y: number } {
   const u = x + glyph.offsetX + glyph.shear * y;
   const size = xhMm * glyph.scale;
-  const su = u * size;
+  const su = u * size * (glyph.narrow ?? 1);
   const sv = y * size;
   const cos = Math.cos(glyph.rotation);
   const sin = Math.sin(glyph.rotation);

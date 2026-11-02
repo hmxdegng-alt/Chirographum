@@ -9,7 +9,7 @@
 // each stroke becomes its own translucent layer.
 
 import { resample, type Sample } from "./geometry";
-import type { Hand } from "./hand";
+import { variantsOf, type Hand } from "./hand";
 import { glyphPointToPage, TAPE_WIDTH_MM, tapeSpan, type Decoration, type LayoutResult, type PlacedGlyph } from "./layout";
 import { PENCIL_COLOR, penById, wornPen, type PenModel } from "./pens";
 import { createRng, deriveSeed, type Rng } from "./random";
@@ -1211,7 +1211,7 @@ export function renderPage(
   };
   const addGlyph = (glyph: PlacedGlyph, hidden: boolean) => {
     if (glyph.page !== options.pageIndex) return;
-    const variant = hand.glyphs[glyph.char]?.[glyph.variantIndex];
+    const variant = variantsOf(hand, glyph.char)[glyph.variantIndex];
     if (!variant) return;
     const group = groupFor(glyph.style ?? 0, Boolean(glyph.erased), hidden);
     // Bold: the writer goes over the letter again, a hair off the first pass.
