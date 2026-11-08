@@ -5,7 +5,7 @@
 // sheet does the work.
 
 import { loadPreference, savePreference } from "../bridge";
-import { INK_COLORS, PENS } from "../engine/pens";
+import { INK_COLORS, PEN_GROUPS, penById, type InkColor } from "../engine/pens";
 import {
   ALIGNMENTS,
   CORRECTIONS,
@@ -41,8 +41,10 @@ export interface ToolbarState {
   penId: string;
   /** Ink colour of the selection. */
   inkColor: string;
-  /** Pencils have no ink colour. */
+  /** Graphite and charcoal have no ink colour. */
   inkDisabled: boolean;
+  /** The only colours the instrument has (a two-colour pencil), or null for any colour. */
+  inkChoices: InkColor[] | null;
   /** Letter size of the selection (1 = normal). */
   size: number;
   /** How the selection is (or will be) scribbled out. */
@@ -313,7 +315,9 @@ export function createToolbar(
 
   // Instrument, colour and size for the selection, or for what is typed next.
   const penSelect = h("select", { class: "select tool-select narrow-select", title: es.toolbar.pen, "aria-label": es.toolbar.pen });
-  for (const pen of PENS) penSelect.append(h("option", { value: pen.id }, pen.label));
+  for (const group of PEN_GROUPS) {
+    penSelect.append(h("optgroup", { label: es.toolbar.penGroups[group.id] }, ...group.pens.map((id) => h("option", { value: id }, penById(id).label))));
+  }
   penSelect.addEventListener("change", () => onCommand(`pen:${penSelect.value}`));
 
   const sizeSelect = h("select", { class: "select tool-select size-select", title: es.toolbar.size, "aria-label": es.toolbar.size });
@@ -337,9 +341,15 @@ export function createToolbar(
       });
       return item;
     };
+    // A two-colour pencil only has its two ends: no other colour to pick.
+    if (inkChoices) {
+      inkSwatches.replaceChildren(...inkChoices.map((color) => swatch(color.value, color.label)));
+      return;
+    }
     inkSwatches.replaceChildren(...INK_COLORS.map((color) => swatch(color.value, color.label)));
     if (recentInks.length > 0) inkSwatches.append(h("span", { class: "menu-break" }), ...recentInks.map((value) => swatch(value, value)));
   };
+  let inkChoices: InkColor[] | null = null;
   renderInkSwatches();
   inkMenu.append(inkSwatches);
   // The app's own picker: Chromium's cannot be closed from the page.
@@ -532,8 +542,13 @@ export function createToolbar(
       currentInk = state.inkColor;
       inkChip.style.background = state.inkDisabled ? "#8a8a8a" : currentInk;
       inkButton.disabled = state.inkDisabled;
-      inkButton.title = state.inkDisabled ? es.toolbar.pencilInk : es.toolbar.inkColor;
+      inkButton.title = state.inkDisabled ? es.toolbar.pencilInk : state.inkChoices ? es.toolbar.bicolorInk : es.toolbar.inkColor;
       if (state.inkDisabled) inkMenu.hidden = true;
+      if (state.inkChoices !== inkChoices) {
+        inkChoices = state.inkChoices;
+        renderInkSwatches();
+        customInk.root.hidden = inkChoices !== null;
+      }
       const look = state.scribbleStyle;
       // Only a scribble that is there is shown as chosen: the menu is where it is picked.
       for (const [kind, button] of kindButtons) button.classList.toggle("active", state.scribble && kind === look.kind);

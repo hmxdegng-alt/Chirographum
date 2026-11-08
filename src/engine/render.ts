@@ -11,7 +11,8 @@
 import { resample, type Sample } from "./geometry";
 import { variantsOf, type Hand } from "./hand";
 import { glyphPointToPage, TAPE_WIDTH_MM, tapeSpan, type Decoration, type LayoutResult, type PlacedGlyph } from "./layout";
-import { PENCIL_COLOR, penById, wornPen, type PenModel } from "./pens";
+import { drawnColor, PENCIL_COLOR, penById, wornPen, type PenModel } from "./pens";
+import { pointTone, pointWidth, type PointState } from "./point-wear";
 import { createRng, deriveSeed, type Rng } from "./random";
 import { HIGHLIGHT_COLORS, scribbleStyleOf, type RunStyle } from "./rich-text";
 import { scribbleStrokes } from "./scribble";
@@ -389,6 +390,20 @@ function strokeGeometry(
 /** Lumps of ink per millimetre of line at "Grumos de tinta" 100 % with a ballpoint. */
 const LUMPS_PER_MM = 0.03;
 
+/** A pencil written with a worn point: a wider, lighter line, wider still across a flat side worn into it. */
+function bluntPoint(g: StrokeGeometry, point: PointState | undefined): StrokeGeometry {
+  if (!point || point.blunt <= 0) return g;
+  const n = g.samples.length;
+  const tone = pointTone(point);
+  for (let i = 0; i < n; i++) {
+    const a = g.samples[Math.max(0, i - 1)];
+    const b = g.samples[Math.min(n - 1, i + 1)];
+    g.widths[i] *= pointWidth(point, Math.atan2(b.y - a.y, b.x - a.x));
+    g.tones[i] *= tone;
+  }
+  return g;
+}
+
 /** Draws a stroke as tone (grey levels) with "lighten", so it never darkens itself. */
 function drawTone(ctx: CanvasRenderingContext2D, g: StrokeGeometry, dx: number, dy: number): void {
   if (g.chisel && g.samples.length > 1) {
@@ -732,11 +747,12 @@ export function highlightPasses(d: Decoration): number[] {
 
 /** What is left of letters rubbed out with an eraser: faint, soft, broken. */
 function rubbedOut(pen: PenModel): PenModel {
-  const graphite = pen.kind === "pencil";
+  // Graphite and charcoal come off well; coloured wax and ink leave more behind.
+  const comesOff = pen.material === "graphite" || pen.material === "charcoal";
   return {
     ...pen,
     id: `${pen.id}-erased`,
-    opacity: pen.opacity * (graphite ? 0.3 : 0.42),
+    opacity: pen.opacity * (comesOff ? 0.3 : 0.42),
     softnessMm: pen.softnessMm + 0.05,
     grain: Math.min(1, pen.grain + 0.45),
     edgeRoughness: pen.edgeRoughness + 0.3,
@@ -953,14 +969,14 @@ function drawTape(ctx: CanvasRenderingContext2D, passes: Path2D[], area: InkBox,
   layer.width = 0;
 }
 
-/** An eraser rubbed over pencil: a faint, streaky grey haze of spread graphite. */
-function drawEraserHaze(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: number): InkBox | null {
+/** An eraser rubbed over pencil: a faint, streaky haze of spread graphite (or wax, or charcoal, in its colour). */
+function drawEraserHaze(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: number, color = PENCIL_COLOR, strength = 1): InkBox | null {
   const rng = createRng(deriveSeed(d.seed, "eraser"));
   const xh = d.xhMm;
   const slope = (d.y1 - d.y0) / Math.max(0.01, d.x1 - d.x0);
   const left = d.x0 - 0.4 * xh;
   const right = d.x1 + 0.4 * xh;
-  const [r, g, b] = parseHex(PENCIL_COLOR);
+  const [r, g, b] = parseHex(color);
   ctx.save();
   ctx.globalCompositeOperation = "destination-over";
   ctx.filter = `blur(${Math.max(0.6, 0.25 * pxPerMm).toFixed(2)}px)`;
@@ -972,7 +988,7 @@ function drawEraserHaze(ctx: CanvasRenderingContext2D, d: Decoration, pxPerMm: n
     const cy = d.y0 + slope * (cx - d.x0) + (-1.2 + 1.5 * rng.next()) * xh;
     const length = (0.6 + 1.6 * rng.next()) * xh;
     const angle = (rng.next() - 0.5) * 1.2;
-    ctx.strokeStyle = `rgba(${r},${g},${b},${(0.025 + 0.045 * rng.next()).toFixed(3)})`;
+    ctx.strokeStyle = `rgba(${r},${g},${b},${(strength * (0.025 + 0.045 * rng.next())).toFixed(3)})`;
     ctx.lineWidth = (0.3 + 0.5 * rng.next()) * xh * pxPerMm;
     ctx.beginPath();
     ctx.moveTo((cx - Math.cos(angle) * length) * pxPerMm, (cy - Math.sin(angle) * length) * pxPerMm);
@@ -1147,7 +1163,7 @@ export function renderPage(
     const run = style > 0 ? runStyles[style - 1] : undefined;
     const used = wornPen(run?.penId ? penById(run.penId) : pen, options.wear ?? 0);
     const groupPen = erased ? rubbedOut(used) : used;
-    const color = groupPen.kind === "pencil" ? PENCIL_COLOR : (run?.color ?? options.color);
+    const color = drawnColor(groupPen, run?.color ?? options.color);
     const key = `${groupPen.id}|${color}|${erased ? "erased" : "ink"}`;
     const map = hidden ? hiddenGroups : groups;
     let group = map.get(key);
@@ -1161,7 +1177,8 @@ export function renderPage(
   // Geometry of every stroke on this page: letters (bold ones twice) and hand-drawn lines.
   const highlights: { geometry: StrokeGeometry; color: number; smear: number; seed: number }[] = [];
   /** Correction tape and eraser marks, drawn under the ink. */
-  const corrections: { d: Decoration; graphite: boolean }[] = [];
+  /** Correction tape and eraser marks, drawn under the ink; `haze` is the colour an eraser spreads (dry media only). */
+  const corrections: { d: Decoration; haze: string | null; hazeStrength: number }[] = [];
   const tapes: { passes: Path2D[]; box: InkBox; strokePx: number; strength: number }[] = [];
   let minX = Infinity;
   let minY = Infinity;
@@ -1229,11 +1246,15 @@ export function renderPage(
           const mapped = glyphPointToPage(glyph, page.xHeightMm, point.x, point.y);
           return { x: mapped.x * pxPerMm + dx, y: mapped.y * pxPerMm + dy, p: point.p };
         });
-        include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1)), deriveSeed(glyph.seed, "stroke", strokeIndex, pass));
+        const geometry = strokeGeometry(points, rng, group.pen, nat, pxPerMm, page.xHeightMm, widthScale * (glyph.bold ? 1.12 : 1));
+        include(group, bluntPoint(geometry, glyph.point), deriveSeed(glyph.seed, "stroke", strokeIndex, pass));
       });
     }
   };
   for (const glyph of layout.glyphs) addGlyph(glyph, false);
+  /** Lines drawn with a pencil are drawn with its point as it was at their first letter. */
+  const pointAt = new Map<number, PointState>();
+  for (const glyph of layout.glyphs) if (glyph.point) pointAt.set(glyph.index, glyph.point);
   for (const glyph of layout.hidden ?? []) addGlyph(glyph, true);
   for (const d of layout.decorations) {
     if (d.page !== options.pageIndex) continue;
@@ -1245,7 +1266,11 @@ export function renderPage(
       continue;
     }
     if (d.kind === "erased") {
-      corrections.push({ d, graphite: groupFor(d.style ?? 0).pen.kind === "pencil" });
+      const erasedGroup = groupFor(d.style ?? 0);
+      const dry = erasedGroup.pen.kind === "pencil";
+      // Charcoal spreads into a dark cloud; coloured wax stains a little.
+      const hazeStrength = erasedGroup.pen.material === "charcoal" ? 2.2 : erasedGroup.pen.material === "wax" ? 0.8 : 1;
+      corrections.push({ d, haze: dry ? erasedGroup.color : null, hazeStrength });
       continue;
     }
     if (d.kind === "scribble") {
@@ -1255,7 +1280,7 @@ export function renderPage(
       const width = widthScale * 1.1 * look.width;
       for (const stroke of scribbleStrokes(d, look)) {
         const points = stroke.map((point) => ({ x: point.x * pxPerMm, y: point.y * pxPerMm, p: point.p }));
-        if (points.length > 1) include(group, strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width), d.seed, true);
+        if (points.length > 1) include(group, bluntPoint(strokeGeometry(points, rng, group.pen, nat, pxPerMm, d.xhMm, width), pointAt.get(d.start)), d.seed, true);
       }
       continue;
     }
@@ -1298,7 +1323,7 @@ export function renderPage(
       });
     } else {
       const group = groupFor(d.style ?? 0);
-      include(group, strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), d.seed, true);
+      include(group, bluntPoint(strokeGeometry(handLine(d, pxPerMm), rng, group.pen, nat, pxPerMm, d.xhMm, widthScale), pointAt.get(d.start)), d.seed, true);
     }
   }
 
@@ -1636,8 +1661,8 @@ export function renderPage(
     ctx.restore();
     hiddenInk.canvas.width = 0;
   }
-  for (const { d, graphite } of corrections) {
-    const area = graphite ? drawEraserHaze(ctx, d, pxPerMm) : null;
+  for (const { d, haze, hazeStrength } of corrections) {
+    const area = haze ? drawEraserHaze(ctx, d, pxPerMm, haze, hazeStrength) : null;
     fullBox = unionBox(fullBox, area ? clampBox(area, canvas.width, canvas.height) : null, canvas.width, canvas.height);
   }
 

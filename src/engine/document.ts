@@ -14,7 +14,11 @@ export interface PenTuning {
   inkStrength: number;
   /** How used the instrument is (0 = new): see wornPen. */
   wear: number;
+  /** How fast a wooden pencil's point wears as you write (0 = always sharp): see applyPointWear. */
+  pointWear: number;
 }
+
+export const DEFAULT_PEN_TUNING: PenTuning = { widthScale: 1, inkStrength: 1, wear: 0, pointWear: 0.5 };
 
 export interface SheetSettings {
   penId: string;

@@ -3,10 +3,11 @@
 
 import { bridge, loadPreference, savePreference } from "../bridge";
 import { editedWordRange, randomCharId, updateCharIds } from "../engine/char-ids";
-import type { ChiroDocument, PenTuning, SheetSettings } from "../engine/document";
+import { DEFAULT_PEN_TUNING, type ChiroDocument, type PenTuning, type SheetSettings } from "../engine/document";
 import { charactersNeeded, type Hand } from "../engine/hand";
 import { defaultCharIds, layoutText, normaliseText, placeUnderTape, type LayoutFormat, type LayoutResult } from "../engine/layout";
-import { DEFAULT_PEN_ID, INK_COLORS, PENCIL_COLOR, penById } from "../engine/pens";
+import { DEFAULT_PEN_ID, drawnColor, INK_COLORS, penById } from "../engine/pens";
+import { applyPointWear } from "../engine/point-wear";
 import { freshSeed, hashString } from "../engine/random";
 import { renderPage } from "../engine/render";
 import {
@@ -136,6 +137,7 @@ const USUAL: Record<string, UsualRange> = {
   widthScale: { usual: [0.65, 1.6], caution: 0.25 },
   inkStrength: { usual: [0.55, 1.2], caution: 0.15 },
   wear: { usual: [0, 0.75], caution: 0.15 },
+  pointWear: { usual: [0, 1.2], caution: 0.3 },
   xHeightMm: { usual: [2, 5], caution: 0.8 },
   lineSpacingMm: { usual: [6.5, 14], caution: 2 },
   letterSpacing: { usual: [-0.05, 0.5], caution: 0.15 },
@@ -205,7 +207,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   let naturalness: Naturalness = { ...presetById(DEFAULT_PRESET_ID).values, ...loadPreference<Partial<Naturalness>>("sheet.naturalness", {}) };
   let seed = loadPreference("sheet.seed", freshSeed());
   /** The user's adjustments to the instrument: thickness and amount of ink. */
-  let penTuning: PenTuning = { widthScale: 1, inkStrength: 1, wear: 0, ...loadPreference<Partial<PenTuning>>("sheet.penTuning", {}) };
+  let penTuning: PenTuning = { ...DEFAULT_PEN_TUNING, ...loadPreference<Partial<PenTuning>>("sheet.penTuning", {}) };
   let renderTimer: number | undefined;
   let layout: LayoutResult | null = null;
   /** What each page canvas shows, to redraw only the pages that changed. */
@@ -229,7 +231,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     savePreference("sheet.penTuning", penTuning);
   };
 
-  const currentColor = () => (penById(penId).kind === "pencil" ? PENCIL_COLOR : inkColor);
+  const currentColor = () => drawnColor(penById(penId), inkColor);
 
   // ----- Text, the identity of every letter, and formatting -----
   const initialText = normaliseText(loadPreference("sheet.text", store.get().phrase));
@@ -729,7 +731,13 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     else if (kind === "highlight") {
       if (value === "none") toggleFlag(HIGHLIGHT, highlightColor, false);
       else highlightOut({ color: Math.max(0, Math.min(HIGHLIGHT_COLORS.length - 1, Number(value) || 0)) });
-    } else if (kind === "pen") changeRunStyle({ penId: value === "default" ? undefined : penById(value).id });
+    } else if (kind === "pen") {
+      const pen = penById(value);
+      // A two-colour pencil writes with one of its ends: red unless the selection already is blue.
+      const chosen = selectionStyle().color ?? inkColor;
+      const keepColor = !pen.inkChoices || pen.inkChoices.some((c) => c.value.toLowerCase() === chosen.toLowerCase());
+      changeRunStyle(keepColor ? { penId: pen.id } : { penId: pen.id, color: pen.inkChoices![0].value });
+    }
     else if (kind === "ink" && /^#[0-9a-f]{6}$/i.test(value)) changeRunStyle({ color: value });
     else if (kind === "size") changeRunStyle({ size: Number(value) || 1 });
     else if (kind === "style") setParagraphs((format) => ({ ...format, style: value as ParagraphStyle }));
@@ -815,7 +823,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       scribble: has(SCRIBBLE),
       penId: penById(selected.penId ?? penId).id,
       inkColor: selected.color ?? inkColor,
-      inkDisabled: penById(selected.penId ?? penId).kind === "pencil",
+      inkDisabled: penById(selected.penId ?? penId).fixedColor !== undefined,
+      inkChoices: penById(selected.penId ?? penId).inkChoices ?? null,
       size: selected.size ?? 1,
       scribbleStyle: has(SCRIBBLE) ? scribbleStyleOf(selected) : lastScribble,
       highlightWords: has(HIGHLIGHT) ? Boolean(selected.highlightWords) : highlightWords,
@@ -854,6 +863,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       onInput: (value) => {
         penTuning = { ...penTuning, [key]: value };
         persist();
+        // How worn each letter's pencil point is is worked out with the layout.
+        if (key === "pointWear") relayout();
         scheduleRender();
       },
     }));
@@ -1088,7 +1099,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   };
 
   const resetInk = () => {
-    penTuning = { widthScale: 1, inkStrength: 1, wear: 0 };
+    penTuning = { ...DEFAULT_PEN_TUNING };
     for (const [key, set] of tuningSetters) set(penTuning[key]);
     persist();
     scheduleRender();
@@ -1171,6 +1182,8 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
       tuningSlider(es.sheet.widthScale, "widthScale", 0.3, 3),
       tuningSlider(es.sheet.inkStrength, "inkStrength", 0.2, 1.2),
       tuningSlider(es.sheet.wear, "wear", 0, 1, 0),
+      tuningSlider(es.sheet.pointWear, "pointWear", 0, 2, DEFAULT_PEN_TUNING.pointWear),
+      h("p", { class: "muted section-help", "data-search": searchKey(`${es.sheet.pointWear} ${es.sheet.pointWearHelp}`) }, es.sheet.pointWearHelp),
     ),
     section(
       "page",
@@ -1257,10 +1270,26 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
   /** The imperfections actually used: the advanced values times the overall amount. */
   const effectiveNaturalness = () => scaledNaturalness(naturalness, naturalnessAmount);
 
+  /** Where every letter goes, and how worn each pencil's point was when it was written. */
+  function computeLayout(hand: Hand): LayoutResult {
+    const result = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
+    applyPointWear(
+      result,
+      (style) => {
+        const run = style > 0 ? runStyles[style - 1] : undefined;
+        const pen = penById(run?.penId ?? penId);
+        return { pen, color: drawnColor(pen, run?.color ?? inkColor) };
+      },
+      penTuning.pointWear,
+      seed,
+    );
+    return result;
+  }
+
   /** Recomputes where everything goes (fast); the drawing follows later. */
   function relayout(): void {
     const hand = store.get().hand;
-    layout = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
+    layout = computeLayout(hand);
     renderWarnings(layout);
     editor.setLayout(layout, page);
     editor.setEmptyMessage(Object.keys(hand.glyphs).length > 0 ? null : es.sheet.emptyHand);
@@ -1287,7 +1316,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     ];
     for (const g of result.glyphs) {
       if (g.page !== pageIndex) continue;
-      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), (g.narrow ?? 1).toFixed(3), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0, g.style);
+      parts.push(g.char, g.variantIndex, g.xMm.toFixed(3), g.yMm.toFixed(3), g.scale.toFixed(4), (g.narrow ?? 1).toFixed(3), g.rotation.toFixed(4), g.shear.toFixed(4), g.seed, g.bold ? 1 : 0, g.style, g.point ? `${g.point.blunt}/${g.point.facet}/${g.point.uneven}` : "");
     }
     for (const d of result.decorations) {
       if (d.page !== pageIndex) continue;
@@ -1352,7 +1381,7 @@ export function createSheetView(store: Store): { root: HTMLElement; onShow: () =
     const printRoot = document.getElementById("print-root")!;
     const urls: string[] = [];
     try {
-      const result = layoutText(lastText, hand, page, effectiveNaturalness(), seed, charIds, layoutFormat());
+      const result = computeLayout(hand);
       const { raster, printer } = PRINT_QUALITIES[printQuality];
       const pxPerMm = raster / MM_PER_INCH;
       // Printing keeps the ink transparent (lossless PNG). The PDF gets the ink on

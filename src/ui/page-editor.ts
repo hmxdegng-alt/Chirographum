@@ -296,6 +296,24 @@ export function createPageEditor(options: PageEditorOptions): PageEditor {
       options.onCommand?.(command);
       return;
     }
+    if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      // Tab writes a tab (a gap or an indent made by hand) instead of leaving the page.
+      event.preventDefault();
+      if (!event.shiftKey) {
+        replaceSelection("\t");
+        return;
+      }
+      // Shift+Tab takes back the tab just before the cursor, or the one starting its paragraph.
+      const at = input.selectionStart;
+      if (input.selectionStart !== input.selectionEnd) return;
+      const text = input.value;
+      const paragraphStart = text.lastIndexOf("\n", at - 1) + 1;
+      const tab = text[at - 1] === "\t" ? at - 1 : text[paragraphStart] === "\t" ? paragraphStart : -1;
+      if (tab < 0) return;
+      input.setSelectionRange(tab, tab + 1);
+      replaceSelection("");
+      return;
+    }
     const all = stops();
     if (all.length === 0) return;
     const focus = focusIndex();

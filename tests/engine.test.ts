@@ -53,7 +53,8 @@ import { hyphenationPoints, syllabify } from "../src/engine/hyphenate";
 import { scribbleStrokes } from "../src/engine/scribble";
 import { highlightPasses } from "../src/engine/render";
 import { sliderZone } from "../src/ui/dom";
-import { penById, wornPen } from "../src/engine/pens";
+import { BICOLOR_INKS, drawnColor, PEN_GROUPS, PENCIL_GRADES, PENS, penById, wornPen } from "../src/engine/pens";
+import { applyPointWear, pointWidth } from "../src/engine/point-wear";
 import { A4, PRESETS, presetById, randomNaturalness } from "../src/engine/settings";
 
 const require = createRequire(import.meta.url);
@@ -351,7 +352,7 @@ describe("presets", () => {
 const documentDefaults = {
   penId: "gel-07",
   inkColor: "#22399a",
-  penTuning: { widthScale: 1, inkStrength: 1, wear: 0 },
+  penTuning: { widthScale: 1, inkStrength: 1, wear: 0, pointWear: 0.5 },
   page: A4,
   presetId: "normal",
   naturalness: presetById("normal").values,
@@ -368,7 +369,7 @@ describe("documents", () => {
   const defaults = {
     penId: "gel-07",
     inkColor: "#22399a",
-    penTuning: { widthScale: 1, inkStrength: 1, wear: 0 },
+    penTuning: { widthScale: 1, inkStrength: 1, wear: 0, pointWear: 0.5 },
     page: A4,
     presetId: "normal",
     naturalness: presetById("normal").values,
@@ -1029,5 +1030,118 @@ describe("Chirographum documents folder", () => {
     expect(path.basename(b)).toBe("Carta (2).chiro");
     expect(fs.readFileSync(a, "utf8")).toBe("uno");
     fs.rmSync(documents, { recursive: true, force: true });
+  });
+});
+
+describe("Tab in the text", () => {
+  const hand = syntheticHand("abcdefghijklmnopqrstuvwxyz:");
+  const calm = { ...presetById("calligrapher").values, marginDrift: 0, blockTilt: 0, spacingVariation: 0 };
+  it("a tab in the middle of a line leaves a wide gap, about a centimetre", () => {
+    const withSpace = layoutText("nombre: pablo", hand, A4, calm, 3);
+    const withTab = layoutText("nombre:\tpablo", hand, A4, calm, 3);
+    const gap = (r: ReturnType<typeof layoutText>) => r.glyphs.find((g) => g.index === 8)!.xMm - r.glyphs.find((g) => g.index === 6)!.xMm;
+    expect(gap(withTab) - gap(withSpace)).toBeGreaterThan(5);
+    expect(gap(withTab)).toBeLessThan(20);
+  });
+});
+
+describe("pencils and their points", () => {
+  it("grades go from hard and light (3H) to soft and dark (6B); 3H and HB are as before", () => {
+    const pencils = PENCIL_GRADES.map((g) => penById(`pencil-${g.toLowerCase()}`));
+    expect(PENCIL_GRADES).toEqual(["3H", "2H", "H", "F", "HB", "B", "2B", "3B", "4B", "5B", "6B"]);
+    for (let i = 1; i < pencils.length; i++) {
+      expect(pencils[i].opacity).toBeGreaterThan(pencils[i - 1].opacity);
+      expect(pencils[i].widthMm).toBeGreaterThan(pencils[i - 1].widthMm);
+      expect(pencils[i].smudge).toBeGreaterThan(pencils[i - 1].smudge);
+      expect(pencils[i].pointWear!).toBeGreaterThan(pencils[i - 1].pointWear!);
+    }
+    expect(penById("pencil-hb")).toMatchObject({ widthMm: 0.52, opacity: 0.72, grain: 0.85, smudge: 1.2 });
+    expect(penById("pencil-3h")).toMatchObject({ widthMm: 0.42, opacity: 0.42, grain: 0.9, smudge: 0.5 });
+    expect(penById("mechanical-05")).toMatchObject({ widthMm: 0.4, opacity: 0.55 });
+  });
+
+  it("every instrument is in the toolbar once, grouped", () => {
+    const listed = PEN_GROUPS.flatMap((g) => g.pens);
+    expect(new Set(listed).size).toBe(listed.length);
+    expect([...listed].sort()).toEqual(PENS.map((p) => p.id).sort());
+    expect(PEN_GROUPS.find((g) => g.id === "mechanical")!.pens).toEqual(["mechanical-03", "mechanical-05", "mechanical-07", "mechanical-09"]);
+    for (const id of ["pencil-color", "pencil-bicolor", "charcoal"]) expect(PEN_GROUPS.find((g) => g.id === "pencils")!.pens).toContain(id);
+  });
+
+  it("graphite and charcoal keep their colour, the two-colour pencil only has red and blue, coloured pencils any", () => {
+    expect(drawnColor(penById("pencil-2b"), "#ff0000")).toBe(penById("pencil-2b").fixedColor);
+    expect(drawnColor(penById("charcoal"), "#22399a")).toBe("#1c1b1b");
+    expect(drawnColor(penById("pencil-bicolor"), BICOLOR_INKS[1].value)).toBe(BICOLOR_INKS[1].value);
+    expect(drawnColor(penById("pencil-bicolor"), "#22399a")).toBe(BICOLOR_INKS[0].value);
+    expect(drawnColor(penById("pencil-color"), "#3a9a22")).toBe("#3a9a22");
+    expect(drawnColor(penById("gel-07"), "#22399a")).toBe("#22399a");
+  });
+
+  const hand = syntheticHand("abcdefghijklmnopqrstuvwxyz");
+  const words = "la casa del parque tiene una puerta verde y un jardin con muchas flores ";
+  const text = words.repeat(40).trim();
+  const wear = (penId: string, amount: number, styles: { penId?: string; color?: string }[] = [], marks?: number[]) => {
+    const result = layoutText(text, hand, A4, presetById("normal").values, 5, undefined, marks ? { marks, runStyles: styles } : undefined);
+    applyPointWear(
+      result,
+      (style) => {
+        const run = style > 0 ? styles[style - 1] : undefined;
+        const pen = penById(run?.penId ?? penId);
+        return { pen, color: drawnColor(pen, run?.color ?? "#22399a") };
+      },
+      amount,
+      5,
+    );
+    return result.glyphs.sort((a, b) => a.index - b.index);
+  };
+  const sharpenings = (glyphs: ReturnType<typeof wear>) =>
+    glyphs.filter((g, i) => i > 0 && (g.point?.blunt ?? 0) < (glyphs[i - 1].point?.blunt ?? 0) - 0.05);
+
+  it("a pencil's point gets blunter as you write and is sharpened between words", () => {
+    const glyphs = wear("pencil-hb", 1);
+    expect(glyphs.every((g) => (g.point?.blunt ?? 0) >= 0 && (g.point?.blunt ?? 0) <= 1)).toBe(true);
+    const sharpened = sharpenings(glyphs);
+    expect(sharpened.length).toBeGreaterThan(1);
+    // Always after a space, never in the middle of a word; mostly at a line start or after a full stop or comma.
+    for (const g of sharpened) expect(text[g.index - 1]).toBe(" ");
+    // Mostly at the start of a line (this text has no full stops).
+    const result = layoutText(text, hand, A4, presetById("normal").values, 5);
+    const atLineStart = sharpened.filter((g) => result.carets[g.index].line !== result.carets[g.index - 2].line);
+    expect(atLineStart.length).toBeGreaterThanOrEqual(sharpened.length / 2);
+    // Some stretches wear more on one side.
+    expect(glyphs.some((g) => (g.point?.uneven ?? 0) > 0)).toBe(true);
+    expect(glyphs.some((g) => g.point && g.point.uneven === 0)).toBe(true);
+  });
+
+  it("soft leads need sharpening sooner than hard ones; pens, markers and mechanical pencils never wear", () => {
+    expect(sharpenings(wear("pencil-6b", 1)).length).toBeGreaterThan(2 * sharpenings(wear("pencil-2h", 1)).length);
+    expect(sharpenings(wear("charcoal", 1)).length).toBeGreaterThan(sharpenings(wear("pencil-6b", 1)).length);
+    for (const id of ["gel-07", "ballpoint-10", "fineliner", "mechanical-07"]) expect(wear(id, 1).some((g) => g.point)).toBe(false);
+    expect(wear("pencil-hb", 0).some((g) => g.point)).toBe(false);
+  });
+
+  it("each pencil keeps its own point: the red and the blue end wear apart", () => {
+    const half = Math.floor(text.length / 2);
+    const marks = [...text].map((_, i) => (i < half ? 1 : 2) << 9);
+    const both = wear("gel-07", 1, [{ penId: "pencil-bicolor", color: BICOLOR_INKS[0].value }, { penId: "pencil-bicolor", color: BICOLOR_INKS[1].value }], marks);
+    const red = wear("pencil-bicolor", 1, [{ color: BICOLOR_INKS[0].value }], [...text].map(() => 1 << 9));
+    // The blue end starts with its own point, not where the red one left off.
+    const firstBlue = both.find((g) => g.index >= half)!;
+    const redThere = red.find((g) => g.index === firstBlue.index)!;
+    expect(firstBlue.point?.blunt).not.toBe(redThere.point?.blunt);
+  });
+
+  it("a worn point draws a wider line; worn on one side, wider across that side than along it", () => {
+    expect(pointWidth({ blunt: 0.8, facet: 0, uneven: 0 }, 0)).toBeCloseTo(1.44, 5);
+    const lopsided = { blunt: 0.8, facet: 0, uneven: 1 };
+    expect(pointWidth(lopsided, Math.PI / 2)).toBeGreaterThan(1.3 * pointWidth(lopsided, 0));
+  });
+
+  it("an edit near the end leaves the points before it alone", () => {
+    const before = wear("pencil-2b", 1);
+    const result = layoutText(`${text} y fin`, hand, A4, presetById("normal").values, 5);
+    applyPointWear(result, () => ({ pen: penById("pencil-2b"), color: "#000000" }), 1, 5);
+    const after = result.glyphs.sort((a, b) => a.index - b.index);
+    for (let i = 0; i < before.length; i++) expect(after[i].point).toEqual(before[i].point);
   });
 });

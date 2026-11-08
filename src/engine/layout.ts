@@ -6,6 +6,7 @@
 
 import { AUTO_HYPHEN, variantBounds, variantsOf, type Hand } from "./hand";
 import { hyphenationPoints } from "./hyphenate";
+import type { PointState } from "./point-wear";
 import { clampedGauss, createRng, deriveSeed, hashString } from "./random";
 import {
   BOLD,
@@ -58,6 +59,8 @@ export interface PlacedGlyph {
   erased?: boolean;
   /** Squeezed sideways (a word crammed in at the end of a line); 1 or absent = as drawn. */
   narrow?: number;
+  /** How worn the pencil's point was (wooden pencils only; set by applyPointWear). */
+  point?: PointState;
 }
 
 /**
@@ -866,7 +869,9 @@ export function layoutText(
       }
       const rng = createRng(token.seed);
       gapStart = cursor;
-      cursor += page.wordSpacing * baseXh * line.scale * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
+      // A tab in the middle of a line leaves a wide gap, about a centimetre, never quite the same.
+      const space = page.wordSpacing * baseXh * line.scale * Math.max(0.4, 1 + clampedGauss(rng) * 0.3 * nat.spacingVariation);
+      cursor += text[token.index] === "\t" ? Math.max(space, handIndent(TAB_INDENT_MM, token.seed)) : space;
       continue;
     }
     const where = betweenWord(token);
